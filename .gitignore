@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.dist-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+docs/
+# Pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Terraform (provider binaries and state)
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!example.tfvars
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Deploy state (non-secret config saved by deploy.sh for --delete auto-fill)
+.byob-state
+
+# Cursor IDE
+.cursor/
+
+# Internal planning / task files (not for distribution)
+.superpowers/
+docs/superpowers/
+
+# Stray / duplicate files
+.gitingore
