@@ -14,8 +14,8 @@ CONNECT_TIMEOUT_SEC = 10
 SUBMIT_TIMEOUT_SEC = 300   # 5 minutes
 POLL_TIMEOUT_SEC = 30
 
-# 429 rate-limit back-off sequence: wait 30 s, then 60 s, then give up.
-_RATE_LIMIT_WAITS = (30, 60)
+# 429 rate-limit back-off sequence (seconds): 30 s → 60 s → 300 s → give up.
+_RATE_LIMIT_WAITS = (30, 60, 300)
 
 
 class CortexValidationError(Exception):
@@ -40,7 +40,18 @@ def _headers(credentials: Credentials) -> dict:
 
 
 def _post_with_rate_limit_retry(url: str, headers: dict, payload: dict) -> requests.Response:
-    """POST with explicit 429 handling: wait 30 s, retry; wait 60 s, retry; then raise."""
+    """POST with explicit 429 handling.
+
+    Back-off sequence:
+      attempt 1 → 429 → wait 30 s
+      attempt 2 → 429 → wait 60 s
+      attempt 3 → 429 → wait 300 s (5 minutes)
+      attempt 4 → 429 → raise CortexRateLimitError
+
+    The Retry-After response header is honoured when present but capped at
+    120 s to guard against Cortex returning a Unix timestamp by mistake.
+    The 300 s final wait always uses its full value regardless.
+    """
     waits = iter(_RATE_LIMIT_WAITS)
     attempt = 0
     while True:
@@ -59,8 +70,25 @@ def _post_with_rate_limit_retry(url: str, headers: dict, payload: dict) -> reque
                 f"Cortex returned 429 after {attempt} attempt(s); "
                 "reduce posting frequency or contact Palo Alto support."
             )
-        retry_after = int(resp.headers.get("Retry-After", wait))
-        actual_wait = max(wait, retry_after)
+        raw_retry_after = resp.headers.get("Retry-After")
+        if raw_retry_after is not None and wait < 300:
+            # Only apply Retry-After header logic on the shorter waits.
+            # The final 300 s wait is always used in full.
+            try:
+                value = int(raw_retry_after)
+                # Cortex sometimes returns a Unix timestamp instead of a delay.
+                # Any value > 3600 is almost certainly a timestamp, not seconds.
+                if value > 3600:
+                    delay_from_header = value - int(time.time())
+                else:
+                    delay_from_header = value
+                # Cap at 120 s — never wait longer than that regardless of header.
+                server_wait = max(0, min(delay_from_header, 120))
+            except ValueError:
+                server_wait = wait
+            actual_wait = max(wait, server_wait)
+        else:
+            actual_wait = wait
         logger.warning(
             "Rate limited (429) on attempt %d — waiting %d s before retry ...",
             attempt, actual_wait,
