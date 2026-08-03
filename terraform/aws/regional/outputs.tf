@@ -6,8 +6,8 @@ output "lambda_function_arn" {
   value = aws_lambda_function.byob_scanner.arn
 }
 
-output "eventbridge_rule_arn" {
-  value = aws_cloudwatch_event_rule.scheduled.arn
+output "eventbridge_rule_arns" {
+  value = { for k, r in aws_cloudwatch_event_rule.severity : k => r.arn }
 }
 
 output "secret_arn" {

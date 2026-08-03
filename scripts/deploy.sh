@@ -185,9 +185,7 @@ delete_aws() {
   [[ ! -f "$ZIP_PATH" ]] && ZIP_PATH="/dev/null"
 
   # Load filter values saved at deploy time (only needed to satisfy Terraform vars)
-  SAVED_STATUSES="$(state_get aws_inspector2_statuses "ACTIVE")"
-  SAVED_SEVERITIES="$(state_get aws_inspector2_severities "LOW,MEDIUM,HIGH,CRITICAL")"
-  SAVED_LOOKBACK="$(state_get aws_inspector2_lookback_hours "12")"
+  SAVED_LOOKBACK="$(state_get aws_inspector2_lookback_hours "6")"
 
   terraform -chdir="$TF_REGIONAL" init -upgrade -input=false >/dev/null
   terraform -chdir="$TF_GLOBAL"   init -upgrade -input=false >/dev/null
@@ -202,8 +200,6 @@ delete_aws() {
       -var="lambda_zip_path=${ZIP_PATH}" \
       -var="cortex_secret_name=${SECRET_NAME}" \
       -var="lambda_role_arn=${LAMBDA_ROLE_ARN}" \
-      -var="inspector2_statuses=${SAVED_STATUSES}" \
-      -var="inspector2_severities=${SAVED_SEVERITIES}" \
       -var="inspector2_lookback_hours=${SAVED_LOOKBACK}"
     success "Regional resources destroyed in $region"
   done
@@ -367,29 +363,11 @@ deploy_aws() {
   SECRET_NAME="${SECRET_NAME}-$(gen_suffix)"
   echo -e "  ${DIM}Secret name with suffix:  ${BOLD}${SECRET_NAME}${RESET}"
 
-  ask INSPECTOR2_STATUSES \
-    "Inspector2 finding statuses to collect" \
-    "Comma-separated — valid values: ACTIVE, SUPPRESSED, CLOSED" \
-    "$(state_get aws_inspector2_statuses "ACTIVE")"
-
-  ask INSPECTOR2_SEVERITIES \
-    "Inspector2 severities to collect" \
-    "Comma-separated — valid values: INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL, UNTRIAGED" \
-    "$(state_get aws_inspector2_severities "LOW,MEDIUM,HIGH,CRITICAL")"
-
-  ask INSPECTOR2_LOOKBACK_HOURS \
-    "Lookback window in hours for the Lambda (runs every 6 hours)" \
-    "Set to 12 for a delta with overlap; 720 = 30 days (code default); 0 = no time filter" \
-    "$(state_get aws_inspector2_lookback_hours "12")"
-
   split_regions "$AWS_REGIONS_RAW"
 
   # ── save state (no secrets) ───────────────────────────────────────────────
   state_set aws_regions                   "$AWS_REGIONS_RAW"
   state_set aws_secret_name               "$SECRET_NAME"
-  state_set aws_inspector2_statuses       "$INSPECTOR2_STATUSES"
-  state_set aws_inspector2_severities     "$INSPECTOR2_SEVERITIES"
-  state_set aws_inspector2_lookback_hours "$INSPECTOR2_LOOKBACK_HOURS"
   success "Configuration saved to .byob-state"
 
   # ── step 1: build Lambda zip ──────────────────────────────────────────────
@@ -436,9 +414,7 @@ deploy_aws() {
       -var="lambda_zip_path=${ZIP_PATH}" \
       -var="cortex_secret_name=${SECRET_NAME}" \
       -var="lambda_role_arn=${LAMBDA_ROLE_ARN}" \
-      -var="inspector2_statuses=${INSPECTOR2_STATUSES}" \
-      -var="inspector2_severities=${INSPECTOR2_SEVERITIES}" \
-      -var="inspector2_lookback_hours=${INSPECTOR2_LOOKBACK_HOURS}"
+      -var="inspector2_lookback_hours=6"
     success "Terraform apply complete  [$region]"
 
     step "4/4  Storing credentials in Secrets Manager ($region)"

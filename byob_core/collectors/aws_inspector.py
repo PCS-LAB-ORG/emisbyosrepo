@@ -60,6 +60,18 @@ def _parse_env_list(env_var: str, valid: set[str], default: list[str]) -> list[s
     return [v for v in values if v in valid] or default
 
 
+def _parse_raw_list(raw: str, valid: set[str], default: list[str], label: str) -> list[str]:
+    """Parse a comma-separated string directly (used for EventBridge event overrides)."""
+    values = [v.strip().upper() for v in raw.split(",") if v.strip()]
+    unknown = set(values) - valid
+    if unknown:
+        logger.warning(
+            "Unknown %s values ignored: %s — valid values are: %s",
+            label, unknown, valid,
+        )
+    return [v for v in values if v in valid] or default
+
+
 def _lookback_hours() -> int:
     """Return INSPECTOR2_LOOKBACK_HOURS as a non-negative int.
 
@@ -76,17 +88,48 @@ def _lookback_hours() -> int:
         return 720
 
 
-def collect(mode: str, finding_arn: str | None = None, region: str | None = None) -> list[RawFinding]:
-    """Collect findings. The boto3 client is created once; transient errors are retried per-call."""
+def collect(
+    mode: str,
+    finding_arn: str | None = None,
+    region: str | None = None,
+    severities: str | None = None,
+    statuses: str | None = None,
+    lookback_hours: int | None = None,
+) -> list[RawFinding]:
+    """Collect findings.
+
+    ``severities``, ``statuses``, and ``lookback_hours`` may be passed
+    explicitly (e.g. from an EventBridge input payload) and take priority
+    over the corresponding env vars.  When not provided the env vars are
+    read as normal.
+    """
     client = boto3.client("inspector2", region_name=region or _DEFAULT_REGION)
-    statuses = _parse_env_list("INSPECTOR2_STATUSES", _VALID_STATUSES, ["ACTIVE"])
-    severities = _parse_env_list("INSPECTOR2_SEVERITIES", _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL"])
-    hours = _lookback_hours()
-    logger.info(
-        "Inspector2 filters — statuses: %s  severities: %s  lookback_hours: %s",
-        statuses, severities, hours if hours > 0 else "disabled (full scan)",
+
+    if statuses is not None:
+        resolved_statuses = _parse_raw_list(statuses, _VALID_STATUSES, ["ACTIVE"], "statuses")
+    else:
+        resolved_statuses = _parse_env_list("INSPECTOR2_STATUSES", _VALID_STATUSES, ["ACTIVE"])
+
+    if severities is not None:
+        resolved_severities = _parse_raw_list(severities, _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL"], "severities")
+    else:
+        resolved_severities = _parse_env_list("INSPECTOR2_SEVERITIES", _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL"])
+
+    resolved_hours = _lookback_hours() if lookback_hours is None else max(int(lookback_hours), 0)
+
+    source = (
+        "event-override"
+        if any(v is not None for v in (severities, statuses, lookback_hours))
+        else "env-vars"
     )
-    return _collect_with_retry(client, mode, finding_arn, statuses, severities, hours)
+    logger.info(
+        "Inspector2 filters — statuses: %s  severities: %s  lookback_hours: %s  [source: %s]",
+        resolved_statuses,
+        resolved_severities,
+        resolved_hours if resolved_hours > 0 else "disabled (full scan)",
+        source,
+    )
+    return _collect_with_retry(client, mode, finding_arn, resolved_statuses, resolved_severities, resolved_hours)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))

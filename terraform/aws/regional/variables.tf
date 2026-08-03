@@ -18,25 +18,14 @@ variable "lambda_role_arn" {
   description = "ARN of the IAM role created by the global module"
 }
 
-variable "schedule_expression" {
-  type    = string
-  default = "rate(6 hours)"
-}
-
 variable "inspector2_statuses" {
   type        = string
   default     = "ACTIVE"
-  description = "Comma-separated Inspector2 finding statuses to collect. Valid: ACTIVE, SUPPRESSED, CLOSED"
-}
-
-variable "inspector2_severities" {
-  type        = string
-  default     = "LOW,MEDIUM,HIGH,CRITICAL"
-  description = "Comma-separated Inspector2 severities to collect. Valid: INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL, UNTRIAGED"
+  description = "Comma-separated Inspector2 finding statuses applied to all severity rules. Valid: ACTIVE, SUPPRESSED, CLOSED"
 }
 
 variable "inspector2_lookback_hours" {
   type        = number
-  default     = 12
-  description = "Only return findings updated in the last N hours. 0 = disabled (full scan). Set to 12 for the scheduled Lambda so each 6-hour run pulls a delta with overlap."
+  default     = 6
+  description = "Only return findings updated in the last N hours. Each severity rule runs every 4 hours — 6 gives a 2-hour overlap safety buffer. 0 = no time filter."
 }

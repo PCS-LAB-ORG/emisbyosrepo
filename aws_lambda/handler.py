@@ -43,6 +43,34 @@ def lambda_handler(event: dict, context: Any) -> dict:
             finding_arn = None
             logger.info("Mode: scheduled full scan")
 
+        # ── apply per-invocation filter overrides from EventBridge input ──────
+        # EventBridge rules can pass a static JSON payload via the "input" field,
+        # allowing a single Lambda to be invoked by multiple rules with different
+        # filter settings (e.g. CRITICAL every hour, HIGH,CRITICAL every 6 hours).
+        # Values in the event take priority over Lambda env vars.
+        # Event-driven Inspector2 finding invocations are never overridden —
+        # they always use the env var defaults.
+        overrides: dict[str, str] = {}
+        if mode == "scheduled":
+            if "inspector2_severities" in event:
+                overrides["severities"] = str(event["inspector2_severities"])
+                logger.info(
+                    "Filter override from EventBridge: severities=%s",
+                    overrides["severities"],
+                )
+            if "inspector2_statuses" in event:
+                overrides["statuses"] = str(event["inspector2_statuses"])
+                logger.info(
+                    "Filter override from EventBridge: statuses=%s",
+                    overrides["statuses"],
+                )
+            if "inspector2_lookback_hours" in event:
+                overrides["lookback_hours"] = int(event["inspector2_lookback_hours"])
+                logger.info(
+                    "Filter override from EventBridge: lookback_hours=%s",
+                    overrides["lookback_hours"],
+                )
+
         # ── load credentials ──────────────────────────────────────────────────
         logger.info("Loading Cortex credentials ...")
         creds = secrets.load_credentials()
@@ -51,7 +79,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # ── collect findings ──────────────────────────────────────────────────
         logger.info("Collecting Inspector2 findings (mode=%s) ...", mode)
         t0 = time.time()
-        findings = aws_inspector.collect(mode=mode, finding_arn=finding_arn)
+        findings = aws_inspector.collect(mode=mode, finding_arn=finding_arn, **overrides)
         logger.info(
             "Collection complete | findings=%d elapsed=%.1fs",
             len(findings), time.time() - t0,
