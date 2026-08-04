@@ -3,261 +3,218 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bring Your Own Build - Scanner</title>
+<title>ByobScanner</title>
 <style>
-  *, *::before, *::after { box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #24292e; background: #fff; margin: 0; padding: 0; }
-  .page { max-width: 960px; margin: 0 auto; padding: 40px 32px 80px; }
-  h1 { font-size: 2em; border-bottom: 2px solid #e1e4e8; padding-bottom: 12px; margin-top: 0; }
-  h2 { font-size: 1.5em; border-bottom: 1px solid #e1e4e8; padding-bottom: 8px; margin-top: 48px; }
-  h3 { font-size: 1.15em; margin-top: 32px; }
-  h4 { font-size: 1em; margin-top: 24px; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 960px; margin: 40px auto; padding: 0 20px; color: #24292e; line-height: 1.6; }
+  h1,h2,h3,h4 { border-bottom: 1px solid #eaecef; padding-bottom: .3em; margin-top: 1.5em; }
+  h1 { font-size: 2em; } h2 { font-size: 1.5em; } h3 { font-size: 1.25em; }
+  code { background: #f6f8fa; padding: .2em .4em; border-radius: 3px; font-size: 85%; }
+  pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; font-size: 100%; }
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+  th, td { border: 1px solid #dfe2e5; padding: 6px 13px; }
+  th { background: #f6f8fa; font-weight: 600; }
+  tr:nth-child(even) { background: #f6f8fa; }
+  blockquote { border-left: 4px solid #dfe2e5; padding: 0 1em; color: #6a737d; margin: 1em 0; }
+  hr { border: 0; border-top: 1px solid #eaecef; margin: 2em 0; }
   a { color: #0366d6; text-decoration: none; }
   a:hover { text-decoration: underline; }
-  code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 0.875em; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 4px; padding: 2px 5px; }
-  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px 20px; overflow-x: auto; margin: 16px 0; }
-  pre code { background: none; border: none; padding: 0; font-size: 0.85em; }
-  table { border-collapse: collapse; width: 100%; margin: 16px 0; }
-  th { background: #f6f8fa; font-weight: 600; text-align: left; }
-  th, td { border: 1px solid #e1e4e8; padding: 8px 14px; }
-  tr:nth-child(even) td { background: #fafbfc; }
-  hr { border: none; border-top: 1px solid #e1e4e8; margin: 40px 0; }
-  ul, ol { padding-left: 24px; }
-  li { margin: 4px 0; }
-  .toc { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 20px 28px; margin: 24px 0; display: inline-block; min-width: 320px; }
-  .toc ul { margin: 4px 0; }
-  .toc > ul { margin-top: 0; }
-  .arch { font-family: "SFMono-Regular", Consolas, monospace; background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 6px; padding: 16px 20px; margin: 16px 0; white-space: pre; font-size: 0.88em; }
-  .step-box { background: #fff8e1; border-left: 4px solid #f9a825; border-radius: 0 6px 6px 0; padding: 14px 18px; margin: 16px 0; }
-  .step-num { display: inline-block; background: #0366d6; color: #fff; border-radius: 50%; width: 26px; height: 26px; text-align: center; line-height: 26px; font-weight: 700; font-size: 0.85em; margin-right: 8px; }
-  .badge { display: inline-block; font-size: 0.75em; font-weight: 600; padding: 2px 8px; border-radius: 12px; background: #0366d6; color: #fff; vertical-align: middle; }
-  .note { background: #e8f4fd; border-left: 4px solid #0366d6; border-radius: 0 6px 6px 0; padding: 12px 16px; margin: 16px 0; font-size: 0.93em; }
+  ul { padding-left: 2em; }
 </style>
 </head>
 <body>
-<div class="page">
-
-<h1>Bring Your Own Build - Scanner</h1>
-
-<p>Pushes vulnerability findings from <strong>AWS Inspector2</strong> and <strong>Azure Defender for Cloud</strong> to <strong>Cortex XDR</strong> via the Bring Your Own Scanner (BYOS) API.</p>
-
-<div class="arch">AWS Inspector2  ──→  Lambda (Python 3.12)       ──┐
-                                                    ├──→  Cortex XDR  (BYOS API)
-Azure Defender  ──→  Azure Function (Python 3.12) ──┘</div>
-
-<p>Each function runs on a <strong>6-hour schedule</strong> and also triggers in real time on new findings (EventBridge / Event Grid). Credentials are stored in cloud-native secrets stores — no secrets in code or environment variables.</p>
-
+<h1 id="bring-your-own-build---scanner">Bring Your Own Build - Scanner</h1>
+<p>Pushes vulnerability findings from <strong>AWS Inspector2</strong>, <strong>Azure Defender for Cloud</strong>, and <strong>Tenable Vulnerability Management</strong> to <strong>Cortex XDR</strong> via the Bring Your Own Scanner (BYOS) API.</p>
+<pre><code class="language-">AWS Inspector2         ──→  Lambda (Python 3.12)       ──┐
+Azure Defender         ──→  Azure Function (Python 3.12) ─┼──→  Cortex XDR  (BYOS API)
+Tenable Vulnerability  ──→  integration_test.py / Lambda ─┘
+</code></pre>
+<p>The AWS Lambda runs on a <strong>6-hour schedule</strong> (4 EventBridge rules, one per severity, staggered 30 min apart) and also triggers in real time on new findings. The Azure Function runs on a timer and Event Grid trigger. Tenable exports are run via the integration test script for the initial bulk import and can be wired to a Lambda or cron for delta runs. Credentials are stored in cloud-native secrets stores — no secrets in code or environment variables.</p>
 <hr>
-
-<h2>Getting Started</h2>
-
-<h3><span class="step-num">1</span> Unzip the archive</h3>
-<pre><code>unzip ByobScanner-share.zip
-cd ByobScanner</code></pre>
-
-<h3><span class="step-num">2</span> Install prerequisites</h3>
-<table>
-  <tr><th>Tool</th><th>Version</th><th>macOS</th><th>Windows</th><th>Linux</th></tr>
-  <tr>
-    <td>Python</td><td>3.12+</td>
-    <td><code>brew install python@3.12</code></td>
-    <td>Download installer from <a href="https://www.python.org/downloads/">python.org</a></td>
-    <td><code>apt install python3.12</code> / <code>yum install python3.12</code></td>
-  </tr>
-  <tr>
-    <td>Terraform</td><td>1.5+</td>
-    <td><code>brew install terraform</code></td>
-    <td><code>choco install terraform</code> or <a href="https://developer.hashicorp.com/terraform/install">download zip</a></td>
-    <td>HashiCorp APT/YUM repo — see <a href="https://developer.hashicorp.com/terraform/install">install docs</a></td>
-  </tr>
-  <tr>
-    <td>AWS CLI</td><td>v2</td>
-    <td><code>brew install awscli</code></td>
-    <td>MSI installer from <a href="https://aws.amazon.com/cli/">aws.amazon.com/cli</a></td>
-    <td><code>curl</code> installer — see <a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html">install docs</a></td>
-  </tr>
-  <tr>
-    <td>zip</td><td>any</td>
-    <td>Pre-installed</td>
-    <td>Use WSL or <a href="https://www.7-zip.org/">7-Zip</a></td>
-    <td>Pre-installed / <code>apt install zip</code></td>
-  </tr>
-</table>
+<h2 id="getting-started">Getting Started</h2>
+<h3 id="1--unzip-the-archive">1. Unzip the archive</h3>
+<pre><code class="language-bash">unzip ByobScanner-share.zip
+cd ByobScanner
+</code></pre>
+<h3 id="2--install-prerequisites">2. Install prerequisites</h3>
+<table><thead><tr><th>Tool</th><th>Version</th><th>Install</th></tr></thead><tbody><tr><td>Python</td><td>3.12+</td><td><a href="https://www.python.org/downloads/">python.org/downloads</a> — macOS: <code>brew install python@3.12</code> · Windows: installer · Linux: <code>apt/yum install python3.12</code></td></tr><tr><td>Terraform</td><td>1.5+</td><td><a href="https://developer.hashicorp.com/terraform/install">developer.hashicorp.com/terraform/install</a> — macOS: <code>brew install terraform</code> · Windows: <code>choco install terraform</code> · Linux: see HashiCorp APT/YUM repo</td></tr><tr><td>AWS CLI</td><td>v2</td><td><a href="https://aws.amazon.com/cli/">docs.aws.amazon.com/cli</a> — macOS: <code>brew install awscli</code> · Windows: MSI installer · Linux: <code>curl</code> installer (see link)</td></tr><tr><td>zip</td><td>any</td><td>Pre-installed on macOS/Linux — Windows: use WSL or <code>7-Zip</code></td></tr></tbody></table>
 <p>Verify everything is ready:</p>
-<pre><code>terraform  --version   # Terraform v1.5+
+<pre><code class="language-bash">terraform  --version   # Terraform v1.5+
 python3    --version   # Python 3.12+
 aws        --version   # aws-cli/2.x
-zip        --version</code></pre>
-
-<h3><span class="step-num">3</span> Authenticate the AWS CLI</h3>
-<pre><code>aws configure
-# or, if using SSO:
-aws sso login --profile &lt;your-profile&gt;</code></pre>
+zip        --version
+</code></pre>
+<h3 id="3--authenticate-the-aws-cli">3. Authenticate the AWS CLI</h3>
+<pre><code class="language-bash">aws configure
+<h1 id="or--if-using-sso">or, if using SSO:</h1>
+aws sso login --profile &lt;your-profile&gt;
+</code></pre>
 <p>Confirm it is working:</p>
-<pre><code>aws sts get-caller-identity</code></pre>
-
-<h3><span class="step-num">4</span> Have your Cortex XDR API credentials ready</h3>
-<p>Open Cortex XDR → <strong>Settings → Configurations → API Keys</strong> and create a <strong>Standard</strong> key with the <strong>Vulnerability Management</strong> permission scope.</p>
-<table>
-  <tr><th>Value</th><th>Where to find it</th></tr>
-  <tr><td>API key</td><td>Shown once at creation — copy it now</td></tr>
-  <tr><td>API key ID</td><td>Numeric ID shown next to the key</td></tr>
-  <tr><td>API URL</td><td>Shown in the API Keys settings page — e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr>
-</table>
-
-<h3><span class="step-num">5</span> Deploy to AWS</h3>
+<pre><code class="language-bash">aws sts get-caller-identity
+</code></pre>
+<h3 id="4--have-your-cortex-xdr-api-credentials-ready">4. Have your Cortex XDR API credentials ready</h3>
+<p>Open Cortex XDR → <strong>Settings → Configurations → API Keys</strong> and create a <strong>Standard</strong> key with the <strong>Vulnerability Management</strong> permission scope. You will need:</p>
+<table><thead><tr><th>Value</th><th>Where to find it</th></tr></thead><tbody><tr><td>API key</td><td>Shown once at creation — copy it now</td></tr><tr><td>API key ID</td><td>Numeric ID shown next to the key</td></tr><tr><td>API URL</td><td>Shown in the API Keys settings page — e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr></tbody></table>
+<h3 id="5--deploy-to-aws">5. Deploy to AWS</h3>
 <p>Run the interactive deploy script:</p>
-<pre><code>chmod +x scripts/deploy.sh
-./scripts/deploy.sh aws</code></pre>
-<p>When it asks for an <strong>AWS region</strong> you can enter a <strong>single region</strong> or a <strong>comma-separated list</strong> to deploy to multiple regions at once:</p>
-<pre><code>Single region:    us-east-1
-Multiple regions: us-east-1,us-west-2,eu-west-1</code></pre>
+<pre><code class="language-bash">chmod +x scripts/deploy.sh
+./scripts/deploy.sh aws
+</code></pre>
+<p>The script prompts you through every value. When it asks for an <strong>AWS region</strong> you can enter a <strong>single region</strong> or a <strong>comma-separated list</strong> to deploy to multiple regions at once:</p>
+<pre><code class="language-">Single region:    us-east-1
+Multiple regions: us-east-1,us-west-2,eu-west-1
+</code></pre>
 <p>Each region is managed as its own Terraform workspace so all states are kept separate. The IAM role is a global AWS resource and is created once; the Lambda, EventBridge rule, and Secrets Manager secret are created per region.</p>
 <p>The script performs these steps automatically:</p>
-<pre><code>[1/4]  Build dist/byob_lambda.zip  (once, shared)
+<pre><code class="language-">[1/4]  Build dist/byob_lambda.zip  (once, shared)
          Installs byob_core dependencies for Linux x86-64
          Packages handler.py into a Lambda-ready zip
-
-[2/4]  terraform apply  →  terraform/aws/global/  (once)
-         Creates the shared IAM role + policy (byob-scanner-lambda-role)
-
-[3/4]  terraform workspace select &lt;region&gt;  +  terraform apply  →  terraform/aws/regional/
+<p>[2/4]  terraform apply  →  terraform/aws/global/  (once)
+         Creates the shared IAM role + policy (byob-scanner-lambda-role)</p>
+<p>[3/4]  terraform workspace select &lt;region&gt;  +  terraform apply  →  terraform/aws/regional/
          Per region: Lambda function, EventBridge schedule,
-                     Secrets Manager secret placeholder
-
-[4/4]  aws secretsmanager put-secret-value  --region &lt;region&gt;
-         Stores your Cortex credentials in Secrets Manager</code></pre>
+                     Secrets Manager secret placeholder</p>
+<p>[4/4]  aws secretsmanager put-secret-value  --region &lt;region&gt;
+         Stores your Cortex credentials in Secrets Manager
+</code></pre></p>
 <p>When it finishes you will see the Terraform outputs for each region:</p>
-<pre><code>lambda_function_name = "byob-scanner"
+<pre><code class="language-">lambda_function_name = "byob-scanner"
 lambda_function_arn  = "arn:aws:lambda:us-east-1:..."
 eventbridge_rule_arn = "arn:aws:events:us-east-1:..."
-secret_arn           = "arn:aws:secretsmanager:us-east-1:..."</code></pre>
-
-<h3><span class="step-num">6</span> Verify the deployment</h3>
-<p>Run a dry-run integration test — no data is posted to Cortex:</p>
-<pre><code>pip install -e ".[dev]"   # install byob_core locally (first time only)
-
-python3 scripts/integration_test.py --source aws --dry-run --region us-east-1</code></pre>
-<p>Expected output:</p>
-<pre><code>INFO: Inspector2 filters — statuses: ['ACTIVE']  severities: ['MEDIUM', 'HIGH', 'CRITICAL']
+secret_arn           = "arn:aws:secretsmanager:us-east-1:..."
+</code></pre>
+<h3 id="6--verify-the-deployment">6. Verify the deployment</h3>
+<p>Run a dry-run integration test to confirm findings are collected and normalised correctly (no data is posted to Cortex):</p>
+<pre><code class="language-bash">pip install -e ".[dev]"   # install byob_core locally (first time only)
+<p>python3 scripts/integration_test.py --source aws --dry-run --region us-east-1
+</code></pre></p>
+<p>You should see a summary like:</p>
+<pre><code class="language-">INFO: Inspector2 filters — statuses: ['ACTIVE']  severities: ['MEDIUM', 'HIGH', 'CRITICAL']
 INFO: Collecting from aws ...
 INFO: Inspector2: 1115 raw findings — 1115 kept ...
 INFO: Normalized 7 asset(s) into 1 batch(es)
 INFO: Batch 1/1 — 7 asset(s), 1115 vuln(s)
-INFO: --- DRY RUN: first batch payload ---</code></pre>
-<p>Override the default filters at the command line:</p>
-<pre><code># Only CRITICAL findings
+INFO: --- DRY RUN: first batch payload ---
+</code></pre>
+<p>Override the default severity and status filters at the command line:</p>
+<pre><code class="language-bash"># Only CRITICAL findings
 python3 scripts/integration_test.py --source aws --dry-run --region us-east-1 \
   --severities CRITICAL
-
-# HIGH and CRITICAL, active findings only
+<h1 id="high-and-critical--active-findings-only">HIGH and CRITICAL, active findings only</h1>
 python3 scripts/integration_test.py --source aws --dry-run --region us-east-1 \
   --severities HIGH,CRITICAL \
-  --statuses ACTIVE</code></pre>
-<p>Live end-to-end test (posts to Cortex):</p>
-<pre><code>python3 scripts/integration_test.py --source aws --post --region us-east-1 \
+  --statuses ACTIVE
+</code></pre>
+<p>To do a live end-to-end test (posts to Cortex):</p>
+<pre><code class="language-bash">python3 scripts/integration_test.py --source aws --post --region us-east-1 \
   --severities HIGH,CRITICAL \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key &lt;key&gt; \
-  --cortex-auth-id &lt;id&gt;</code></pre>
-
-<h3><span class="step-num">7</span> Invoke the Lambda manually</h3>
-<pre><code>aws lambda invoke \
+  --cortex-auth-id &lt;id&gt;
+</code></pre>
+<h3 id="7--invoke-the-lambda-manually">7. Invoke the Lambda manually</h3>
+<pre><code class="language-bash">aws lambda invoke \
   --function-name byob-scanner \
   --region us-east-1 \
   --payload '{}' \
   --cli-binary-format raw-in-base64-out \
-  response.json &amp;&amp; cat response.json</code></pre>
-<p>Successful response:</p>
-<pre><code>{"status": "ok", "findings_count": 1115, "batches": 1, "assets_pushed": 7, "vulnerabilities_pushed": 1115}</code></pre>
-<p>Tail CloudWatch logs:</p>
-<pre><code>aws logs tail /aws/lambda/byob-scanner --follow --region us-east-1</code></pre>
-
+  response.json &amp;&amp; cat response.json
+</code></pre>
+<p>A successful response looks like:</p>
+<pre><code class="language-json">{"status": "ok", "findings_count": 1115, "batches": 1, "assets_pushed": 7, "vulnerabilities_pushed": 1115}
+</code></pre>
+<p>Check the logs in CloudWatch:</p>
+<pre><code class="language-bash">aws logs tail /aws/lambda/byob-scanner --follow --region us-east-1
+</code></pre>
 <hr>
-
-<h2>Table of Contents</h2>
-<div class="toc">
+<h2 id="teardown">Teardown</h2>
+<p>To destroy all cloud resources created by the deploy script, pass <code>--delete</code>:</p>
+<pre><code class="language-bash"># Remove AWS resources
+./scripts/deploy.sh aws --delete
+<h1 id="remove-azure-resources">Remove Azure resources</h1>
+./scripts/deploy.sh azure --delete
+<h1 id="remove-both">Remove both</h1>
+./scripts/deploy.sh both --delete
+</code></pre>
+<p>When prompted for region(s), enter the same value(s) you used at deploy time — a <strong>single region</strong> or a <strong>comma-separated list</strong>:</p>
+<pre><code class="language-">Single region:    us-east-1
+Multiple regions: us-east-1,us-west-2,eu-west-1
+</code></pre>
+<p>The script selects the matching Terraform workspace for each region, shows a warning listing every resource that will be destroyed, and requires you to type <code>yes</code> to confirm before running <code>terraform destroy</code>.</p>
+<p><strong>AWS resources removed (destroy order):</strong></p>
+<p>Regional resources (per region, destroyed first):
 <ul>
-  <li><a href="#getting-started">Getting Started</a>
-    <ul>
-      <li><a href="#step1">1. Unzip the archive</a></li>
-      <li><a href="#step2">2. Install prerequisites</a></li>
-      <li><a href="#step3">3. Authenticate the AWS CLI</a></li>
-      <li><a href="#step4">4. Cortex XDR credentials</a></li>
-      <li><a href="#step5">5. Deploy to AWS</a></li>
-      <li><a href="#step6">6. Verify the deployment</a></li>
-      <li><a href="#step7">7. Invoke the Lambda manually</a></li>
-    </ul>
-  </li>
-  <li><a href="#prerequisites">Prerequisites</a></li>
-  <li><a href="#repo-structure">Repository structure</a></li>
-  <li><a href="#cortex-credentials">Cortex XDR credentials</a></li>
-  <li><a href="#deploy">Deploy</a>
-    <ul>
-      <li><a href="#deploy-aws">AWS</a></li>
-      <li><a href="#deploy-azure">Azure</a></li>
-      <li><a href="#deploy-both">Both clouds</a></li>
-    </ul>
-  </li>
-  <li><a href="#what-the-script-does">What the script does</a></li>
-  <li><a href="#terraform-vars">Terraform variable reference</a></li>
-  <li><a href="#env-vars">Environment variables reference</a></li>
-  <li><a href="#asset-tags">Asset tags sent to Cortex XDR</a></li>
-  <li><a href="#dev-setup">Development setup</a></li>
-  <li><a href="#teardown">Removing the Deployment</a></li>
-  <li><a href="#tests">Running tests</a></li>
-  <li><a href="#integration-test">Integration test</a></li>
+<li>Lambda function (<code>byob-scanner</code>)</li>
+<li>EventBridge scheduled rule</li>
+<li>Secrets Manager secret</li>
+</ul></p>
+<p>Global resources (destroyed last — shared across all regions):
+<ul>
+<li>IAM role and policy (<code>byob-scanner-lambda-role</code>)</li>
+</ul></p>
+<p><strong>Azure resources removed per region:</strong>
+<ul>
+<li>Function App</li>
+<li>App Service plan</li>
+<li>Key Vault</li>
+<li>Storage account</li>
+<li>Event Grid system topic</li>
+<li>Resource group</li>
+</ul></p>
+<hr>
+<h2 id="table-of-contents">Table of Contents</h2>
+<ul>
+<li><a href="#getting-started">Getting Started</a></li>
+<li><a href="#1-unzip-the-archive">1. Unzip the archive</a></li>
+<li><a href="#2-install-prerequisites">2. Install prerequisites</a></li>
+<li><a href="#3-authenticate-the-aws-cli">3. Authenticate the AWS CLI</a></li>
+<li><a href="#4-have-your-cortex-xdr-api-credentials-ready">4. Have your Cortex XDR API credentials ready</a></li>
+<li><a href="#5-deploy-to-aws">5. Deploy to AWS</a></li>
+<li><a href="#6-verify-the-deployment">6. Verify the deployment</a></li>
+<li><a href="#7-invoke-the-lambda-manually">7. Invoke the Lambda manually</a></li>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#repository-structure">Repository structure</a></li>
+<li><a href="#cortex-xdr-credentials">Cortex XDR credentials</a></li>
+<li><a href="#deploy">Deploy</a></li>
+<li><a href="#aws">AWS</a></li>
+<li><a href="#azure">Azure</a></li>
+<li><a href="#both-clouds">Both clouds</a></li>
+<li><a href="#what-the-script-does">What the script does</a></li>
+<li><a href="#prompts--aws">Prompts — AWS</a></li>
+<li><a href="#prompts--azure">Prompts — Azure</a></li>
+<li><a href="#terraform-variable-reference">Terraform variable reference</a></li>
+<li><a href="#aws--global-terraformawsglobal">AWS — global</a></li>
+<li><a href="#aws--regional-terraformawsregional">AWS — regional</a></li>
+<li><a href="#environment-variables-reference">Environment variables reference</a></li>
+<li><a href="#asset-tags-sent-to-cortex-xdr">Asset tags sent to Cortex XDR</a></li>
+<li><a href="#tenable-vulnerability-management">Tenable Vulnerability Management</a></li>
+<li><a href="#how-it-works">How it works</a></li>
+<li><a href="#tenable-credentials">Tenable credentials</a></li>
+<li><a href="#tenable-environment-variables">Tenable environment variables</a></li>
+<li><a href="#first-bulk-import">First bulk import</a></li>
+<li><a href="#ongoing-delta-runs">Ongoing delta runs</a></li>
+<li><a href="#tenable--cortex-field-mapping">Tenable → Cortex field mapping</a></li>
+<li><a href="#tenable-asset-tags">Tenable asset tags</a></li>
+<li><a href="#development-setup">Development setup</a></li>
+<li><a href="#running-tests">Running tests</a></li>
+<li><a href="#integration-test">Integration test</a></li>
 </ul>
-</div>
-
 <hr>
-
 <h2 id="prerequisites">Prerequisites</h2>
-<table>
-  <tr><th>Tool</th><th>Version</th><th>macOS</th><th>Windows</th><th>Linux</th></tr>
-  <tr>
-    <td>Python</td><td>3.12+</td>
-    <td><code>brew install python@3.12</code></td>
-    <td><a href="https://www.python.org/downloads/">python.org</a> installer</td>
-    <td><code>apt install python3.12</code></td>
-  </tr>
-  <tr>
-    <td>Terraform</td><td>1.5+</td>
-    <td><code>brew install terraform</code></td>
-    <td><code>choco install terraform</code> or <a href="https://developer.hashicorp.com/terraform/install">zip download</a></td>
-    <td><a href="https://developer.hashicorp.com/terraform/install">HashiCorp APT/YUM repo</a></td>
-  </tr>
-  <tr>
-    <td>AWS CLI</td><td>v2</td>
-    <td><code>brew install awscli</code></td>
-    <td><a href="https://aws.amazon.com/cli/">MSI installer</a></td>
-    <td><a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html">curl installer</a></td>
-  </tr>
-  <tr>
-    <td>Azure CLI</td><td>latest</td>
-    <td><code>brew install azure-cli</code></td>
-    <td><a href="https://learn.microsoft.com/cli/azure/install-azure-cli-windows">MSI installer</a></td>
-    <td><a href="https://learn.microsoft.com/cli/azure/install-azure-cli-linux">install script</a></td>
-  </tr>
-  <tr>
-    <td>Cortex XDR</td><td>Exposure Management licence</td>
-    <td colspan="3">BYOS API enabled in tenant settings</td>
-  </tr>
-</table>
-
+<table><thead><tr><th>Tool</th><th>Version</th><th>Notes</th></tr></thead><tbody><tr><td>Python</td><td>3.12+</td><td></td></tr><tr><td>Terraform</td><td>1.5+</td><td></td></tr><tr><td>AWS CLI</td><td>v2</td><td>authenticated; only needed for AWS deployment</td></tr><tr><td>Azure CLI</td><td>latest</td><td><code>az login</code> done; only needed for Azure deployment</td></tr><tr><td>Cortex XDR</td><td>Exposure Management licence</td><td>BYOS API enabled</td></tr></tbody></table>
 <hr>
-
-<h2 id="repo-structure">Repository structure</h2>
-<pre><code>byob_core/                  shared Python library
+<h2 id="repository-structure">Repository structure</h2>
+<pre><code class="language-">byob_core/                  shared Python library
   collectors/
-    aws_inspector.py        AWS Inspector2 collector (status + severity filters)
+    aws_inspector.py        AWS Inspector2 collector (status + severity + time filters)
     azure_defender.py       Azure Defender (Resource Graph) collector
+    tenable_vm.py           Tenable VM vulnerability export collector (async export)
   cortex_client.py          Cortex BYOS POST + job status check
   models.py                 RawFinding, Credentials, JobResult dataclasses
-  normalizer.py             field mapping, 50-asset batching, 30-day age filter
+  normalizer.py             field mapping, batching, 30-day age filter
   secrets.py                credential loader (Secrets Manager or Key Vault)
 aws_lambda/
-  handler.py                Lambda entry point
+  handler.py                Lambda entry point (AWS Inspector2 + EventBridge input)
   requirements.txt
 azure_function/
   function_app.py           Azure Function entry point (timer + event grid)
@@ -266,332 +223,261 @@ azure_function/
 terraform/
   aws/
     global/                 IAM role + policy (created once per account)
-    regional/               Lambda, EventBridge, Secrets Manager (per region)
+    regional/               Lambda, EventBridge rules (4 × severity), Secrets Manager
   azure/                    Function App, Key Vault, Event Grid, Managed Identity
 scripts/
   deploy.sh                 interactive one-command deployment
-  integration_test.py       dry-run / live test helper
-tests/                      unit tests (pytest)</code></pre>
-
+  integration_test.py       dry-run / live test helper (aws, azure, tenable)
+tests/                      unit tests (pytest)
+</code></pre>
 <hr>
-
-<h2 id="cortex-credentials">Cortex XDR credentials</h2>
+<h2 id="cortex-xdr-credentials">Cortex XDR credentials</h2>
 <p>Both functions read a single JSON secret:</p>
-<pre><code>{
+<pre><code class="language-json">{
   "cortex_api_key":  "&lt;your API key&gt;",
   "cortex_auth_id":  "&lt;your API key ID&gt;",
   "cortex_fqdn":     "api-&lt;tenant&gt;.xdr.us.paloaltonetworks.com"
-}</code></pre>
-<p>Find these in Cortex XDR → <strong>Settings → Configurations → API Keys</strong>.<br>
+}
+</code></pre>
+<p>Find these in Cortex XDR → <strong>Settings → Configurations → API Keys</strong>.
 The key needs the <strong>Vulnerability Management</strong> (Exposure Management) permission scope.</p>
 <p>The deploy script prompts for these values and stores them directly in Secrets Manager or Key Vault — they are never written to disk.</p>
-
 <hr>
-
 <h2 id="deploy">Deploy</h2>
-<p><code>scripts/deploy.sh</code> handles the entire deployment interactively: checks prerequisites, prompts for credentials and settings, builds the package, applies Terraform, and stores the secret.</p>
-
-<h3 id="deploy-aws">AWS</h3>
-<pre><code>./scripts/deploy.sh aws</code></pre>
-<p>Prompts for:</p>
+<p><code>scripts/deploy.sh</code> handles the entire deployment interactively: it checks prerequisites, prompts for credentials and settings, builds the package, applies Terraform, stores the secret, and (for Azure) deploys the function code.</p>
+<h3 id="aws">AWS</h3>
+<pre><code class="language-bash">./scripts/deploy.sh aws
+</code></pre>
+<p>The script will prompt for:</p>
 <ul>
-  <li>Cortex API key <em>(hidden input)</em></li>
-  <li>Cortex API key ID</li>
-  <li>Cortex API URL</li>
-  <li>AWS region(s) <em>(default: <code>us-east-1</code> — single or comma-separated)</em></li>
-  <li>Secrets Manager secret name <em>(default: <code>byob/cortex</code>)</em></li>
-  <li>Inspector2 finding statuses <em>(default: <code>ACTIVE</code>)</em></li>
-  <li>Inspector2 severities <em>(default: <code>MEDIUM,HIGH,CRITICAL</code>)</em></li>
+<li>Cortex API key <em>(hidden input)</em></li>
+<li>Cortex API key ID</li>
+<li>Cortex API URL</li>
+<li>AWS region <em>(default: <code>us-east-1</code>)</em></li>
+<li>Secrets Manager secret name <em>(default: <code>byob/cortex</code>)</em></li>
 </ul>
-
-<h3 id="deploy-azure">Azure</h3>
-<pre><code>./scripts/deploy.sh azure</code></pre>
-<p>Prompts for:</p>
+<p>Then it will:</p>
+<p>1. Build <code>dist/byob_lambda.zip</code> (Lambda-compatible package)
+2. Run <code>terraform apply</code> → <code>terraform/aws/global/</code> (IAM role — once per account)
+3. Per region: <code>terraform apply</code> → <code>terraform/aws/regional/</code> (Lambda, 4 EventBridge rules, Secrets Manager)
+4. Per region: Store credentials in AWS Secrets Manager</p>
+<h3 id="azure">Azure</h3>
+<pre><code class="language-bash">./scripts/deploy.sh azure
+</code></pre>
+<p>The script will prompt for:</p>
 <ul>
-  <li>Cortex API key / ID / API URL</li>
-  <li>Azure subscription ID <em>(auto-detected; confirm or override)</em></li>
-  <li>Storage account name <em>(globally unique, 3–24 lowercase chars)</em></li>
-  <li>Azure region <em>(default: <code>eastus</code>)</em></li>
-  <li>Resource group name <em>(default: <code>byob-scanner-rg</code>)</em></li>
-  <li>Function App name <em>(default: <code>byob-scanner-func</code>)</em></li>
-  <li>Key Vault name <em>(default: <code>byob-scanner-kv</code> — globally unique)</em></li>
-  <li>Key Vault secret name <em>(default: <code>cortex-credentials</code>)</em></li>
+<li>Cortex API key <em>(hidden input)</em></li>
+<li>Cortex API key ID</li>
+<li>Cortex API URL</li>
+<li>Azure subscription ID <em>(auto-detected from <code>az account show</code>; confirm or override)</em></li>
+<li>Storage account name <em>(required — must be globally unique, 3–24 lowercase chars)</em></li>
+<li>Azure region <em>(default: <code>eastus</code>)</em></li>
+<li>Resource group name <em>(default: <code>byob-scanner-rg</code>)</em></li>
+<li>Function App name <em>(default: <code>byob-scanner-func</code>)</em></li>
+<li>Key Vault name <em>(default: <code>byob-scanner-kv</code> — must be globally unique)</em></li>
+<li>Key Vault secret name <em>(default: <code>cortex-credentials</code>)</em></li>
 </ul>
-
-<h3 id="deploy-both">Both clouds</h3>
-<pre><code>./scripts/deploy.sh both</code></pre>
-<p>Runs AWS then Azure. Cortex credentials are prompted once and reused for both.</p>
-
+<p>Then it will:</p>
+<p>1. Run <code>terraform init</code> + <code>terraform apply</code> — creates the Function App with a system-assigned Managed Identity and wires the Key Vault access policy automatically
+2. Store credentials in Azure Key Vault
+3. Zip and deploy the Azure Function code</p>
+<h3 id="both-clouds">Both clouds</h3>
+<pre><code class="language-bash">./scripts/deploy.sh both
+</code></pre>
+<p>Runs the AWS flow then the Azure flow. Cortex credentials are prompted once and reused for both.</p>
 <hr>
-
 <h2 id="what-the-script-does">What the script does</h2>
-
-<h3>Prompts — AWS</h3>
-<table>
-  <tr><th>Prompt</th><th>Default</th><th>Description</th></tr>
-  <tr><td>Cortex API key</td><td>—</td><td>Hidden input; not echoed or written to disk</td></tr>
-  <tr><td>Cortex API key ID</td><td>—</td><td>Numeric ID from the XDR console</td></tr>
-  <tr><td>Cortex API URL</td><td>—</td><td>e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr>
-  <tr><td>AWS region(s)</td><td><code>us-east-1</code></td><td>Single value or comma-separated list</td></tr>
-  <tr><td>Secret name</td><td><code>byob/cortex</code></td><td>Secrets Manager path for the credentials JSON</td></tr>
-  <tr><td>Inspector2 statuses</td><td><code>ACTIVE</code></td><td>Comma-separated: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code></td></tr>
-  <tr><td>Inspector2 severities</td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated: <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code></td></tr>
-</table>
-<pre><code>[1/4]  Build dist/byob_lambda.zip  (once)
+<h3 id="prompts---aws">Prompts — AWS</h3>
+<table><thead><tr><th>Prompt</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td>Cortex API key</td><td>—</td><td>Hidden input; not echoed or written to disk</td></tr><tr><td>Cortex API key ID</td><td>—</td><td>Numeric ID from the XDR console</td></tr><tr><td>Cortex API URL</td><td>—</td><td>e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr><tr><td>AWS region(s)</td><td><code>us-east-1</code></td><td>Single value or comma-separated list</td></tr><tr><td>Secret name</td><td><code>byob/cortex</code></td><td>Secrets Manager path for the credentials JSON</td></tr></tbody></table>
+<blockquote><strong>Note:</strong> Severity and status filters are no longer prompted during deploy. They are passed per-execution via the 4 EventBridge rules (one per severity level: CRITICAL, HIGH, MEDIUM, LOW), each with a staggered schedule so only one Lambda runs at a time and Cortex rate limits are respected.</blockquote>
+<p><strong>Steps performed:</strong></p>
+<pre><code class="language-">[1/4]  Build dist/byob_lambda.zip  (once)
          pip install byob_core --target dist/lambda_pkg
            --platform manylinux2014_x86_64 --python-version 3.12
          copy aws_lambda/handler.py → dist/lambda_pkg/
          zip dist/lambda_pkg/ → dist/byob_lambda.zip
-
-[2/4]  terraform -chdir=terraform/aws/global apply  (once per account)
-         Creates: IAM role + policy (byob-scanner-lambda-role)
-
-[3/4]  terraform workspace select &lt;region&gt;
+<p>[2/4]  terraform -chdir=terraform/aws/global apply  (once per account)
+         Creates: IAM role + policy (byob-scanner-lambda-role)</p>
+<p>[3/4]  terraform workspace select &lt;region&gt;
        terraform -chdir=terraform/aws/regional apply  (once per region)
-         Creates: Lambda function, EventBridge schedule,
-                  Secrets Manager secret (placeholder)
-
-[4/4]  aws secretsmanager put-secret-value  --region &lt;region&gt;
-         Stores: {"cortex_api_key":..., "cortex_auth_id":..., "cortex_fqdn":...}</code></pre>
-
-<h3>Prompts — Azure</h3>
-<table>
-  <tr><th>Prompt</th><th>Default</th><th>Description</th></tr>
-  <tr><td>Cortex API key</td><td>—</td><td>Hidden input</td></tr>
-  <tr><td>Cortex API key ID</td><td>—</td><td></td></tr>
-  <tr><td>Cortex API URL</td><td>—</td><td>e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr>
-  <tr><td>Subscription ID</td><td>auto-detected</td><td>Confirmed or overridden</td></tr>
-  <tr><td>Storage account name</td><td><em>(required)</em></td><td>3–24 lowercase chars, globally unique</td></tr>
-  <tr><td>Azure region</td><td><code>eastus</code></td><td>Region for all resources</td></tr>
-  <tr><td>Resource group</td><td><code>byob-scanner-rg</code></td><td></td></tr>
-  <tr><td>Function App name</td><td><code>byob-scanner-func</code></td><td></td></tr>
-  <tr><td>Key Vault name</td><td><code>byob-scanner-kv</code></td><td>Globally unique</td></tr>
-  <tr><td>Secret name</td><td><code>cortex-credentials</code></td><td>Key Vault secret path</td></tr>
-</table>
-<pre><code>[1/3]  terraform -chdir=terraform/azure init
+         Creates: Lambda function,
+                  4 EventBridge rules (byob-scanner-critical/high/medium/low),
+                  Secrets Manager secret (placeholder)</p>
+<p>[4/4]  aws secretsmanager put-secret-value  --region &lt;region&gt;
+         Stores: {"cortex_api_key":..., "cortex_auth_id":..., "cortex_fqdn":...}
+</code></pre></p>
+<h3 id="prompts---azure">Prompts — Azure</h3>
+<table><thead><tr><th>Prompt</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td>Cortex API key</td><td>—</td><td>Hidden input</td></tr><tr><td>Cortex API key ID</td><td>—</td><td></td></tr><tr><td>Cortex API URL</td><td>—</td><td>e.g. <code>api-tenant.xdr.us.paloaltonetworks.com</code></td></tr><tr><td>Subscription ID</td><td>auto-detected</td><td>Confirmed or overridden</td></tr><tr><td>Storage account name</td><td><em>(required)</em></td><td>3–24 lowercase chars, globally unique</td></tr><tr><td>Azure region</td><td><code>eastus</code></td><td>Region for all resources</td></tr><tr><td>Resource group</td><td><code>byob-scanner-rg</code></td><td></td></tr><tr><td>Function App name</td><td><code>byob-scanner-func</code></td><td></td></tr><tr><td>Key Vault name</td><td><code>byob-scanner-kv</code></td><td>Globally unique</td></tr><tr><td>Secret name</td><td><code>cortex-credentials</code></td><td>Key Vault secret path</td></tr></tbody></table>
+<p><strong>Steps performed:</strong></p>
+<pre><code class="language-">[1/3]  terraform -chdir=terraform/azure init
        terraform -chdir=terraform/azure apply
          Creates: Resource group, Storage account, App Service plan,
                   Linux Function App (Python 3.12, system-assigned identity),
-                  Key Vault + access policies,
-                  Event Grid system topic → EventDrivenSync endpoint
-
-[2/3]  az keyvault secret set
+                  Key Vault + access policies (deployer + managed identity),
+                  Event Grid system topic (Microsoft.Security.Assessments)
+                    → subscription to EventDrivenSync function endpoint
+<p>[2/3]  az keyvault secret set
          --vault-name &lt;kv_name&gt;
          --name &lt;secret_name&gt;
-         --value '{"cortex_api_key":...}'
-
-[3/3]  zip azure_function/ → dist/byob_azure.zip
+         --value '{"cortex_api_key":...}'</p>
+<p>[3/3]  zip azure_function/ → dist/byob_azure.zip
        az functionapp deployment source config-zip
-         --name &lt;func_app_name&gt; --src dist/byob_azure.zip</code></pre>
-
+         --name &lt;func_app_name&gt;
+         --src dist/byob_azure.zip
+</code></pre></p>
 <hr>
-
-<h2 id="terraform-vars">Terraform variable reference</h2>
-
-<h3>AWS — global (<code>terraform/aws/global/</code>)</h3>
+<h2 id="terraform-variable-reference">Terraform variable reference</h2>
+<h3 id="aws---global--terraform-aws-global">AWS — global (<code>terraform/aws/global/</code>)</h3>
 <p>Created once per AWS account. No workspace needed.</p>
-<table>
-  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>cortex_secret_name</code></td><td><code>byob/cortex</code></td><td>Used to scope the IAM policy to the correct secret ARN</td></tr>
-</table>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>cortex_secret_name</code></td><td><code>byob/cortex</code></td><td>Used to scope the IAM policy to the correct secret ARN</td></tr></tbody></table>
 <p><strong>Outputs:</strong></p>
-<table>
-  <tr><th>Output</th><th>Description</th></tr>
-  <tr><td><code>lambda_role_arn</code></td><td>ARN of the shared IAM role — passed to each regional deployment</td></tr>
-  <tr><td><code>lambda_role_name</code></td><td>Name of the IAM role</td></tr>
-</table>
-
-<h3>AWS — regional (<code>terraform/aws/regional/</code>)</h3>
+<table><thead><tr><th>Output</th><th>Description</th></tr></thead><tbody><tr><td><code>lambda_role_arn</code></td><td>ARN of the shared IAM role passed to each regional deployment</td></tr><tr><td><code>lambda_role_name</code></td><td>Name of the IAM role</td></tr></tbody></table>
+<h3 id="aws---regional--terraform-aws-regional">AWS — regional (<code>terraform/aws/regional/</code>)</h3>
 <p>One Terraform workspace per region.</p>
-<table>
-  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>aws_region</code></td><td><code>us-east-1</code></td><td>Region for Lambda, EventBridge, Secrets Manager</td></tr>
-  <tr><td><code>lambda_zip_path</code></td><td><code>../../../dist/byob_lambda.zip</code></td><td>Path to the built Lambda zip</td></tr>
-  <tr><td><code>lambda_role_arn</code></td><td><em>(required)</em></td><td>ARN from the global module output</td></tr>
-  <tr><td><code>cortex_secret_name</code></td><td><code>byob/cortex</code></td><td>Secrets Manager secret name</td></tr>
-  <tr><td><code>schedule_expression</code></td><td><code>rate(6 hours)</code></td><td>EventBridge cron schedule</td></tr>
-  <tr><td><code>inspector2_statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses to collect</td></tr>
-  <tr><td><code>inspector2_severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severities to collect</td></tr>
-  <tr><td><code>inspector2_lookback_hours</code></td><td><code>12</code></td><td>Only return findings updated in the last N hours. Lambda default is <code>12</code> (tight delta). Code default when env var unset is <code>720</code> (30 days — matches Cortex API limit). <code>0</code> = no time filter</td></tr>
-</table>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>aws_region</code></td><td><code>us-east-1</code></td><td>Region for Lambda, EventBridge, Secrets Manager</td></tr><tr><td><code>lambda_zip_path</code></td><td><code>../../../dist/byob_lambda.zip</code></td><td>Path to the built Lambda zip</td></tr><tr><td><code>lambda_role_arn</code></td><td><em>(required)</em></td><td>ARN from the global module output</td></tr><tr><td><code>cortex_secret_name</code></td><td><code>byob/cortex</code></td><td>Secrets Manager secret name</td></tr><tr><td><code>inspector2_statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses; passed to Lambda via each EventBridge rule input payload</td></tr><tr><td><code>inspector2_lookback_hours</code></td><td><code>6</code></td><td>Only return findings updated in the last N hours. Lambda default is <code>6</code> (runs every 4 hours with a 6-hour window for overlap). Code default when env var unset is <code>720</code> (30 days — matches Cortex API limit). <code>0</code> = no time filter</td></tr></tbody></table>
+<p><strong>EventBridge rules created per region:</strong></p>
+<table><thead><tr><th>Rule name</th><th>Schedule</th><th>Severity passed in payload</th></tr></thead><tbody><tr><td><code>byob-scanner-critical</code></td><td>Every 4 h, on the hour</td><td><code>CRITICAL</code></td></tr><tr><td><code>byob-scanner-high</code></td><td>Every 4 h, :30 past the hour</td><td><code>HIGH</code></td></tr><tr><td><code>byob-scanner-medium</code></td><td>Every 4 h, 1:00 past the hour</td><td><code>MEDIUM</code></td></tr><tr><td><code>byob-scanner-low</code></td><td>Every 4 h, 1:30 past the hour</td><td><code>LOW</code></td></tr></tbody></table>
+<p>Rules are staggered 30 minutes apart so only one Lambda runs at a time, avoiding Cortex rate limits. Each rule passes its severity (and the configured statuses and lookback window) as a static JSON input to the Lambda.</p>
 <p><strong>Outputs:</strong></p>
-<table>
-  <tr><th>Output</th><th>Description</th></tr>
-  <tr><td><code>lambda_function_name</code></td><td>Lambda function name</td></tr>
-  <tr><td><code>lambda_function_arn</code></td><td>Lambda function ARN</td></tr>
-  <tr><td><code>eventbridge_rule_arn</code></td><td>Scheduled EventBridge rule ARN</td></tr>
-  <tr><td><code>secret_arn</code></td><td>Secrets Manager secret ARN</td></tr>
-</table>
-
-<h3>Azure variables</h3>
-<table>
-  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>subscription_id</code></td><td><em>(required)</em></td><td>Azure subscription ID</td></tr>
-  <tr><td><code>storage_account_name</code></td><td><em>(required)</em></td><td>Globally unique storage account name</td></tr>
-  <tr><td><code>location</code></td><td><code>eastus</code></td><td>Azure region</td></tr>
-  <tr><td><code>resource_group_name</code></td><td><code>byob-scanner-rg</code></td><td>Resource group name</td></tr>
-  <tr><td><code>function_app_name</code></td><td><code>byob-scanner-func</code></td><td>Function App name</td></tr>
-  <tr><td><code>key_vault_name</code></td><td><code>byob-scanner-kv</code></td><td>Key Vault name (globally unique)</td></tr>
-  <tr><td><code>cortex_secret_name</code></td><td><code>cortex-credentials</code></td><td>Key Vault secret name</td></tr>
-</table>
+<table><thead><tr><th>Output</th><th>Description</th></tr></thead><tbody><tr><td><code>lambda_function_name</code></td><td>Lambda function name</td></tr><tr><td><code>lambda_function_arn</code></td><td>Lambda function ARN</td></tr><tr><td><code>eventbridge_rule_arns</code></td><td>Map of severity → EventBridge rule ARN</td></tr><tr><td><code>secret_arn</code></td><td>Secrets Manager secret ARN</td></tr></tbody></table>
+<h3 id="azure-variables">Azure variables</h3>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>subscription_id</code></td><td><em>(required)</em></td><td>Azure subscription ID</td></tr><tr><td><code>storage_account_name</code></td><td><em>(required)</em></td><td>Globally unique storage account name</td></tr><tr><td><code>location</code></td><td><code>eastus</code></td><td>Azure region</td></tr><tr><td><code>resource_group_name</code></td><td><code>byob-scanner-rg</code></td><td>Resource group name</td></tr><tr><td><code>function_app_name</code></td><td><code>byob-scanner-func</code></td><td>Function App name</td></tr><tr><td><code>key_vault_name</code></td><td><code>byob-scanner-kv</code></td><td>Key Vault name (globally unique)</td></tr><tr><td><code>cortex_secret_name</code></td><td><code>cortex-credentials</code></td><td>Key Vault secret name</td></tr></tbody></table>
 <p><strong>Outputs:</strong></p>
-<table>
-  <tr><th>Output</th><th>Description</th></tr>
-  <tr><td><code>function_app_id</code></td><td>Function App resource ID</td></tr>
-  <tr><td><code>function_app_name</code></td><td>Function App name</td></tr>
-  <tr><td><code>function_app_default_hostname</code></td><td>Public hostname</td></tr>
-  <tr><td><code>keyvault_id</code></td><td>Key Vault resource ID</td></tr>
-  <tr><td><code>keyvault_uri</code></td><td>Key Vault URI</td></tr>
-  <tr><td><code>event_grid_topic_id</code></td><td>Event Grid system topic resource ID</td></tr>
-  <tr><td><code>managed_identity_principal_id</code></td><td>Principal ID of the system-assigned identity</td></tr>
-</table>
-
+<table><thead><tr><th>Output</th><th>Description</th></tr></thead><tbody><tr><td><code>function_app_id</code></td><td>Function App resource ID</td></tr><tr><td><code>function_app_name</code></td><td>Function App name</td></tr><tr><td><code>function_app_default_hostname</code></td><td>Public hostname</td></tr><tr><td><code>keyvault_id</code></td><td>Key Vault resource ID</td></tr><tr><td><code>keyvault_uri</code></td><td>Key Vault URI</td></tr><tr><td><code>event_grid_topic_id</code></td><td>Event Grid system topic resource ID</td></tr><tr><td><code>managed_identity_principal_id</code></td><td>Principal ID of the system-assigned identity</td></tr></tbody></table>
 <hr>
-
-<h2 id="env-vars">Environment variables reference</h2>
+<h2 id="environment-variables-reference">Environment variables reference</h2>
 <p>These are set automatically by Terraform — no manual configuration needed.</p>
-
-<h3>AWS Lambda</h3>
-<table>
-  <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>CORTEX_SECRET_NAME</code></td><td><em>(from deploy)</em></td><td>Secrets Manager secret name</td></tr>
-  <tr><td><code>INSPECTOR2_STATUSES</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses. Valid: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code></td></tr>
-  <tr><td><code>INSPECTOR2_SEVERITIES</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severities. Valid: <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code></td></tr>
-  <tr><td><code>INSPECTOR2_LOOKBACK_HOURS</code></td><td><code>12</code> (Lambda) / <code>720</code> (code default)</td><td>Only return findings updated in the last N hours. Lambda is set to <code>12</code> for a tight delta. Code default when unset is <code>720</code> (30 days) — matching the Cortex API hard limit. <code>0</code> = no time filter.</td></tr>
-</table>
-<div class="note">
-  To change filters without redeploying, update the Lambda environment variables in the AWS console or via the CLI:<br>
-  <code>aws lambda update-function-configuration --function-name byob-scanner --region us-east-1 --environment "Variables={CORTEX_SECRET_NAME=byob/cortex,INSPECTOR2_STATUSES=ACTIVE,INSPECTOR2_SEVERITIES=HIGH,CRITICAL,INSPECTOR2_LOOKBACK_HOURS=12}"</code>
-</div>
-
-<h3>Azure Function</h3>
-<table>
-  <tr><th>Variable</th><th>Description</th></tr>
-  <tr><td><code>CORTEX_KEYVAULT_URL</code></td><td>Key Vault URI (e.g. <code>https://byob-scanner-kv.vault.azure.net/</code>)</td></tr>
-  <tr><td><code>CORTEX_SECRET_NAME</code></td><td>Key Vault secret name</td></tr>
-  <tr><td><code>AZURE_SUBSCRIPTION_ID</code></td><td>Subscription ID used by the Resource Graph collector</td></tr>
-</table>
-
+<h3 id="aws-lambda">AWS Lambda</h3>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>CORTEX_SECRET_NAME</code></td><td><em>(from deploy)</em></td><td>Secrets Manager secret name</td></tr><tr><td><code>INSPECTOR2_STATUSES</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses. Valid: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code>. Set at Lambda level as a baseline; each EventBridge rule can override this via its input payload</td></tr><tr><td><code>INSPECTOR2_LOOKBACK_HOURS</code></td><td><code>6</code> (Lambda) / <code>720</code> (code default)</td><td>Only return findings updated in the last N hours. Lambda is set to <code>6</code> to match the 4-hour run interval with overlap. Code default when unset is <code>720</code> (30 days), matching the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to <code>0</code> to disable.</td></tr></tbody></table>
+<blockquote><strong>Severity is not an env var.</strong> Each EventBridge rule passes <code>inspector2_severities</code> directly in its input payload (e.g. <code>"CRITICAL"</code>, <code>"HIGH"</code>, etc.), so the Lambda runs four separate scans at different severity tiers without needing four separate Lambda functions.</blockquote>
+<p>To change the lookback window or statuses after deployment:</p>
+<pre><code class="language-bash">aws lambda update-function-configuration \
+  --function-name byob-scanner \
+  --region us-east-1 \
+  --environment "Variables={CORTEX_SECRET_NAME=byob/cortex,INSPECTOR2_STATUSES=ACTIVE,INSPECTOR2_LOOKBACK_HOURS=6}"
+</code></pre>
+<h3 id="azure-function">Azure Function</h3>
+<table><thead><tr><th>Variable</th><th>Description</th></tr></thead><tbody><tr><td><code>CORTEX_KEYVAULT_URL</code></td><td>Key Vault URI (e.g. <code>https://byob-scanner-kv.vault.azure.net/</code>)</td></tr><tr><td><code>CORTEX_SECRET_NAME</code></td><td>Key Vault secret name</td></tr><tr><td><code>AZURE_SUBSCRIPTION_ID</code></td><td>Subscription ID used by the Resource Graph collector</td></tr></tbody></table>
 <hr>
-
-<h2 id="asset-tags">Asset tags sent to Cortex XDR</h2>
-<p>Every asset pushed to Cortex includes cloud metadata tags alongside any user-defined resource tags. Tags use <code>key:value</code> format.</p>
-
-<h3>EC2 instance</h3>
-<table>
-  <tr><th>Tag</th><th>Example</th></tr>
-  <tr><td><code>cloud:aws</code></td><td></td></tr>
-  <tr><td><code>resource_type:ec2_instance</code></td><td></td></tr>
-  <tr><td><code>aws_account:&lt;account-id&gt;</code></td><td><code>aws_account:123456789012</code></td></tr>
-  <tr><td><code>aws_region:&lt;region&gt;</code></td><td><code>aws_region:us-east-1</code></td></tr>
-  <tr><td><code>instance_id:&lt;id&gt;</code></td><td><code>instance_id:i-0abc1234def56789</code></td></tr>
-  <tr><td><code>instance_type:&lt;type&gt;</code></td><td><code>instance_type:t3.medium</code></td></tr>
-  <tr><td><code>platform:&lt;platform&gt;</code></td><td><code>platform:AMAZON_LINUX_2</code></td></tr>
-  <tr><td><code>vpc:&lt;vpc-id&gt;</code></td><td><code>vpc:vpc-0abc1234</code></td></tr>
-  <tr><td><code>subnet:&lt;subnet-id&gt;</code></td><td><code>subnet:subnet-0abc1234</code></td></tr>
-  <tr><td>User resource tags</td><td><code>env:prod</code>, <code>team:platform</code></td></tr>
-</table>
-
-<h3>ECR container image</h3>
-<table>
-  <tr><th>Tag</th><th>Example</th></tr>
-  <tr><td><code>cloud:aws</code></td><td></td></tr>
-  <tr><td><code>resource_type:ecr_container_image</code></td><td></td></tr>
-  <tr><td><code>aws_account:&lt;registry-id&gt;</code></td><td><code>aws_account:123456789012</code></td></tr>
-  <tr><td><code>aws_region:&lt;region&gt;</code></td><td><code>aws_region:us-east-1</code></td></tr>
-  <tr><td><code>ecr_repository:&lt;name&gt;</code></td><td><code>ecr_repository:my-app</code></td></tr>
-  <tr><td><code>architecture:&lt;arch&gt;</code></td><td><code>architecture:x86_64</code></td></tr>
-  <tr><td><code>image_hash:&lt;digest&gt;</code></td><td><code>image_hash:sha256:abcd1234</code></td></tr>
-  <tr><td><code>image_tags:&lt;tags&gt;</code></td><td><code>image_tags:latest,v1.0</code></td></tr>
-  <tr><td>User resource tags</td><td><code>team:platform</code></td></tr>
-</table>
-<div class="note">The <code>Name</code> tag is used as the asset name and is not duplicated in the tag list.</div>
-
-<hr>
-
-<h2 id="dev-setup">Development setup</h2>
-<pre><code>git clone &lt;repo&gt;
+<h2 id="development-setup">Development setup</h2>
+<pre><code class="language-bash">git clone &lt;repo&gt;
 cd ByobScanner
-pip install -e ".[dev]"</code></pre>
+pip install -e ".[dev]"
+</code></pre>
 <p>Installs <code>byob_core</code> plus <code>pytest</code>, <code>pytest-mock</code>, <code>responses</code>, and <code>moto</code>.</p>
-
 <hr>
-
-<h2 id="teardown">Removing the Deployment</h2>
-<p>Pass <code>--delete</code> to run <code>terraform destroy</code> and remove all cloud resources.</p>
-<pre><code># Remove AWS resources only
-./scripts/deploy.sh aws --delete
-
-# Remove Azure resources only
-./scripts/deploy.sh azure --delete
-
-# Remove both
-./scripts/deploy.sh both --delete</code></pre>
-<p>When prompted for region(s), enter the <strong>same value(s) you used at deploy time</strong> — a single region or a comma-separated list:</p>
-<pre><code>Single region:    us-east-1
-Multiple regions: us-east-1,us-west-2,eu-west-1</code></pre>
-<p>The script selects the matching Terraform workspace for each region, displays a warning listing everything that will be destroyed, and requires you to type <code>yes</code> to confirm before running <code>terraform destroy</code>.</p>
-
-<h4>AWS resources removed (destroy order)</h4>
-<p>Regional resources per region (destroyed first):</p>
-<ul>
-  <li>Lambda function (<code>byob-scanner</code>)</li>
-  <li>EventBridge scheduled rule</li>
-  <li>Secrets Manager secret</li>
-</ul>
-<p>Global resources (destroyed last — shared across all regions):</p>
-<ul>
-  <li>IAM role and policy (<code>byob-scanner-lambda-role</code>)</li>
-</ul>
-
-<h4>Azure resources removed per region</h4>
-<ul>
-  <li>Function App</li>
-  <li>App Service plan</li>
-  <li>Key Vault</li>
-  <li>Storage account</li>
-  <li>Event Grid system topic</li>
-  <li>Resource group</li>
-</ul>
-
-<div class="note">
-  <strong>Note:</strong> Once destroyed, the Cortex credentials stored in Secrets Manager / Key Vault are also deleted.
-  Make a note of your API key and key ID before running <code>--delete</code> if you plan to redeploy later.
-</div>
-
+<h2 id="asset-tags-sent-to-cortex-xdr">Asset tags sent to Cortex XDR</h2>
+<p>Every asset pushed to Cortex includes cloud metadata tags alongside any user-defined resource tags. Tags use <code>key:value</code> format.</p>
+<h3 id="ec2-instance">EC2 instance</h3>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>cloud:aws</code></td><td></td></tr><tr><td><code>resource_type:ec2_instance</code></td><td></td></tr><tr><td><code>aws_account:&lt;account-id&gt;</code></td><td><code>aws_account:123456789012</code></td></tr><tr><td><code>aws_region:&lt;region&gt;</code></td><td><code>aws_region:us-east-1</code></td></tr><tr><td><code>instance_id:&lt;id&gt;</code></td><td><code>instance_id:i-0abc1234def56789</code></td></tr><tr><td><code>instance_type:&lt;type&gt;</code></td><td><code>instance_type:t3.medium</code></td></tr><tr><td><code>platform:&lt;platform&gt;</code></td><td><code>platform:AMAZON_LINUX_2</code></td></tr><tr><td><code>vpc:&lt;vpc-id&gt;</code></td><td><code>vpc:vpc-0abc1234</code></td></tr><tr><td><code>subnet:&lt;subnet-id&gt;</code></td><td><code>subnet:subnet-0abc1234</code></td></tr><tr><td>User tags (from resource)</td><td><code>env:prod</code>, <code>team:platform</code></td></tr></tbody></table>
+<h3 id="ecr-container-image">ECR container image</h3>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>cloud:aws</code></td><td></td></tr><tr><td><code>resource_type:ecr_container_image</code></td><td></td></tr><tr><td><code>aws_account:&lt;registry-id&gt;</code></td><td><code>aws_account:123456789012</code></td></tr><tr><td><code>aws_region:&lt;region&gt;</code></td><td><code>aws_region:us-east-1</code></td></tr><tr><td><code>ecr_repository:&lt;name&gt;</code></td><td><code>ecr_repository:my-app</code></td></tr><tr><td><code>architecture:&lt;arch&gt;</code></td><td><code>architecture:x86_64</code></td></tr><tr><td><code>image_hash:&lt;digest&gt;</code></td><td><code>image_hash:sha256:abcd1234</code></td></tr><tr><td><code>image_tags:&lt;tags&gt;</code></td><td><code>image_tags:latest,v1.0</code></td></tr><tr><td>User tags (from resource)</td><td><code>team:platform</code></td></tr></tbody></table>
+<blockquote>The <code>Name</code> tag is used as the asset name and is not duplicated in the tag list.</blockquote>
 <hr>
-
-<h2 id="tests">Running tests</h2>
-<pre><code>pytest tests/ -v</code></pre>
-<p>All unit tests run entirely offline — no AWS or Azure credentials required.</p>
-
+<h2 id="tenable-vulnerability-management">Tenable Vulnerability Management</h2>
+<h3 id="how-it-works">How it works</h3>
+<p>Tenable uses an <strong>asynchronous export</strong> pattern — no real-time events, just scheduled pulls:</p>
+<pre><code class="language-">1. POST /vulns/export  →  {"export_uuid": "..."}          (start export with filters)
+2. GET  /vulns/export/{uuid}/status  →  poll every 30 s   (wait for FINISHED)
+3. GET  /vulns/export/{uuid}/chunks/{id}                   (download each chunk)
+4. Parse records → RawFinding → normalizer → Cortex BYOS
+</code></pre>
+<p>Key behaviours:
+<ul>
+<li><strong>Delta export</strong>: the <code>since</code> filter (Unix timestamp) restricts the export to findings seen on or after a given date, equivalent to the <code>updatedAt</code> filter in Inspector2.</li>
+<li><strong>One finding per CVE</strong>: a single Tenable plugin can map to multiple CVEs. The collector creates one <code>RawFinding</code> per CVE so each vulnerability gets its own <code>vulnerability_id</code> entry in Cortex.</li>
+<li><strong>Severity sort</strong>: findings are sorted CRITICAL → HIGH → MEDIUM → LOW before normalisation, so the most critical vulnerabilities survive the per-asset 1,000-finding cap.</li>
+<li><strong>409 deduplication</strong>: if an identical export is already in progress (Tenable returns HTTP 409), the collector reuses the existing job UUID instead of failing.</li>
+<li><strong>States</strong>: only <code>OPEN</code> and <code>REOPENED</code> findings are exported — <code>FIXED</code> findings are not forwarded to Cortex.</li>
+</ul></p>
+<h3 id="tenable-credentials">Tenable credentials</h3>
+<p>The collector reads credentials from environment variables:</p>
+<table><thead><tr><th>Variable</th><th>Description</th></tr></thead><tbody><tr><td><code>TENABLE_ACCESS_KEY</code></td><td>Tenable API access key</td></tr><tr><td><code>TENABLE_SECRET_KEY</code></td><td>Tenable API secret key</td></tr></tbody></table>
+<p>Create a Tenable API key pair in <strong>Settings → My Account → API Keys</strong> (or ask your Tenable admin). The account needs at least the <strong>Basic</strong> role and <strong>Can View</strong> access on all assets.</p>
+<h3 id="tenable-environment-variables">Tenable environment variables</h3>
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>TENABLE_ACCESS_KEY</code></td><td><em>(required)</em></td><td>Tenable API access key</td></tr><tr><td><code>TENABLE_SECRET_KEY</code></td><td><em>(required)</em></td><td>Tenable API secret key</td></tr><tr><td><code>TENABLE_SEVERITIES</code></td><td><code>medium,high,critical</code></td><td>Comma-separated severity levels. Valid (lowercase): <code>info</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>critical</code></td></tr><tr><td><code>TENABLE_LOOKBACK_HOURS</code></td><td><code>720</code> (30 days)</td><td>Only return findings seen in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to <code>0</code> to disable (full export — use for first bulk import).</td></tr><tr><td><code>TENABLE_BASE_URL</code></td><td><code>https://cloud.tenable.com</code></td><td>Override for on-premises Tenable Security Center (if applicable)</td></tr></tbody></table>
+<h3 id="first-bulk-import">First bulk import</h3>
+<p>Run once to push all findings from the last 30 days into Cortex:</p>
+<pre><code class="language-bash"># Dry run first — see what will be posted without sending anything
+python3 scripts/integration_test.py --source tenable --dry-run \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt;
+<h1 id="full-30-day-import--default---hours-720">Full 30-day import (default --hours 720)</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key &lt;key&gt; \
+  --cortex-auth-id &lt;id&gt;
+<h1 id="no-time-filter---export-everything--first-import-when-you-want-all-historical-data">No time filter — export everything (first import when you want all historical data)</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 0 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key &lt;key&gt; \
+  --cortex-auth-id &lt;id&gt;
+</code></pre>
+<h3 id="ongoing-delta-runs">Ongoing delta runs</h3>
+<p>After the initial import, run with a short lookback window to pick up only new/updated findings:</p>
+<pre><code class="language-bash"># Delta — last 6 hours (run on a 4-hour schedule with overlap)
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 6
+<h1 id="critical-and-high-only">Critical and high only</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 6 \
+  --severities HIGH,CRITICAL
+</code></pre>
+<p>You can also store the credentials as environment variables and omit the CLI flags:</p>
+<pre><code class="language-bash">export TENABLE_ACCESS_KEY=&lt;access_key&gt;
+export TENABLE_SECRET_KEY=&lt;secret_key&gt;
+export CORTEX_FQDN=api-tenant.xdr.us.paloaltonetworks.com
+export CORTEX_API_KEY=&lt;key&gt;
+export CORTEX_AUTH_ID=&lt;id&gt;
+<p>python3 scripts/integration_test.py --source tenable --post --hours 6
+</code></pre></p>
+<h3 id="tenable---cortex-field-mapping">Tenable → Cortex field mapping</h3>
+<table><thead><tr><th>Tenable field</th><th>Cortex / <code>RawFinding</code> field</th><th>Notes</th></tr></thead><tbody><tr><td><code>asset.uuid</code></td><td><code>asset_id</code></td><td>Stable UUID — use to match assets across exports</td></tr><tr><td><code>asset.hostname</code> / <code>asset.fqdn[0]</code></td><td><code>asset_name</code></td><td>Best available display name</td></tr><tr><td><code>asset.ipv4</code></td><td><code>ipv4</code></td><td>List</td></tr><tr><td><code>asset.ipv6</code></td><td><code>ipv6</code></td><td>List</td></tr><tr><td><code>asset.fqdn</code></td><td><code>fqdn</code></td><td>List</td></tr><tr><td><code>asset.operating_system</code></td><td><code>os_name</code></td><td>String or list → first value</td></tr><tr><td><code>asset.tags</code> + cloud fields</td><td><code>tags</code></td><td>See below</td></tr><tr><td><code>last_found</code> (Unix seconds)</td><td><code>last_seen_ms</code></td><td>Multiplied by 1,000 for milliseconds</td></tr><tr><td><code>plugin.cve[i]</code></td><td><code>cve_id</code></td><td>One <code>RawFinding</code> per CVE; records with no CVE are skipped</td></tr><tr><td><code>severity</code></td><td><code>severity</code></td><td><code>critical→CRITICAL</code>, <code>high→HIGH</code>, <code>medium→MEDIUM</code>, <code>low→LOW</code>, <code>info→INFORMATIONAL</code></td></tr><tr><td><code>plugin.description</code></td><td><code>description</code></td><td>Truncated at 1,000 characters</td></tr><tr><td><code>plugin.id</code> + <code>plugin.name</code> + <code>cvss3_base_score</code></td><td><code>evidence</code></td><td><code>"Plugin 12345: Apache Log4Shell \</td><td>CVSS3: 10.0"</code> — truncated at 500 chars</td></tr><tr><td><code>state</code> + <code>solution</code> + <code>output</code></td><td><code>raw_output</code></td><td>Truncated at 2,000 characters</td></tr></tbody></table>
+<h3 id="tenable-asset-tags">Tenable asset tags</h3>
+<p>Tags are sent to Cortex in <code>key:value</code> format. Cloud provider metadata is detected automatically from the Tenable asset record.</p>
+<p><strong>All Tenable assets:</strong></p>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>cloud:tenable_vm</code></td><td>Always present</td></tr><tr><td>User-defined tags from Tenable</td><td><code>env:production</code>, <code>team:platform</code></td></tr></tbody></table>
+<p><strong>AWS assets (when EC2 metadata is present):</strong></p>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>instance_id:&lt;id&gt;</code></td><td><code>instance_id:i-0abc1234def56789</code></td></tr><tr><td><code>instance_type:&lt;type&gt;</code></td><td><code>instance_type:t3.medium</code></td></tr><tr><td><code>aws_region:&lt;region&gt;</code></td><td><code>aws_region:us-east-1</code></td></tr><tr><td><code>aws_availability_zone:&lt;az&gt;</code></td><td><code>aws_availability_zone:us-east-1a</code></td></tr><tr><td><code>aws_account:&lt;account-id&gt;</code></td><td><code>aws_account:123456789012</code></td></tr></tbody></table>
+<p><strong>Azure assets (when Azure metadata is present):</strong></p>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>azure_vm_id:&lt;id&gt;</code></td><td><code>azure_vm_id:vm-0abc1234</code></td></tr><tr><td><code>azure_resource_group:&lt;rg&gt;</code></td><td><code>azure_resource_group:my-rg</code></td></tr><tr><td><code>azure_subscription_id:&lt;id&gt;</code></td><td><code>azure_subscription_id:sub-0abc1234</code></td></tr></tbody></table>
+<p><strong>GCP assets (when GCP metadata is present):</strong></p>
+<table><thead><tr><th>Tag</th><th>Example</th></tr></thead><tbody><tr><td><code>gcp_project:&lt;project&gt;</code></td><td><code>gcp_project:my-project-123</code></td></tr><tr><td><code>gcp_instance_id:&lt;id&gt;</code></td><td><code>gcp_instance_id:1234567890</code></td></tr><tr><td><code>gcp_zone:&lt;zone&gt;</code></td><td><code>gcp_zone:us-central1-a</code></td></tr></tbody></table>
 <hr>
-
+<h2 id="running-tests">Running tests</h2>
+<pre><code class="language-bash">pytest tests/ -v
+</code></pre>
+<p>All 79 unit tests run entirely offline — no AWS, Azure, or Tenable credentials required.</p>
+<hr>
 <h2 id="integration-test">Integration test</h2>
 <p>Connects to real scanner APIs but does <strong>not</strong> POST to Cortex by default.</p>
-<pre><code># Initial full import — default is 30-day window (--hours 720), matching Cortex API limit
+<h3 id="aws-inspector2">AWS Inspector2</h3>
+<pre><code class="language-bash"># Initial full import — default 30-day window (--hours 720), matches Cortex API limit
 python3 scripts/integration_test.py --source aws  --dry-run
-python3 scripts/integration_test.py --source azure --dry-run
-
-# Tight delta — last 12 hours only (matches Lambda behaviour)
+<h1 id="tight-delta---last-6-hours-only--matches-lambda-behaviour">Tight delta — last 6 hours only (matches Lambda behaviour)</h1>
 python3 scripts/integration_test.py --source aws --dry-run \
-  --hours 12
-
-# Override severity filter (one or more comma-separated values)
+  --hours 6
+<h1 id="override-severity-filter--one-or-more-comma-separated-values">Override severity filter (one or more comma-separated values)</h1>
 python3 scripts/integration_test.py --source aws --dry-run \
   --severities HIGH,CRITICAL
-
-# Override both severity and status filters
+<h1 id="override-both-severity-and-status-filters">Override both severity and status filters</h1>
 python3 scripts/integration_test.py --source aws --dry-run \
   --severities CRITICAL \
   --statuses ACTIVE,SUPPRESSED
-
-# Specify AWS region
+<h1 id="specify-aws-region">Specify AWS region</h1>
 python3 scripts/integration_test.py --source aws --dry-run \
   --region us-west-2 \
   --severities HIGH,CRITICAL
-
-# Full import to Cortex (first run — 30-day window, no --hours needed)
+<h1 id="full-import-to-cortex--first-run---30-day-window--no---hours-needed">Full import to Cortex (first run — 30-day window, no --hours needed)</h1>
 python3 scripts/integration_test.py --source aws --post \
   --region us-east-1 \
   --severities HIGH,CRITICAL \
@@ -599,32 +485,53 @@ python3 scripts/integration_test.py --source aws --post \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key &lt;key&gt; \
   --cortex-auth-id &lt;id&gt;
-
-# Delta run to Cortex (subsequent runs — last 12 hours)
+<h1 id="delta-run-to-cortex--subsequent-runs---last-6-hours">Delta run to Cortex (subsequent runs — last 6 hours)</h1>
 python3 scripts/integration_test.py --source aws --post \
   --region us-east-1 \
-  --hours 12 \
+  --hours 6 \
   --severities HIGH,CRITICAL \
   --statuses ACTIVE \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key &lt;key&gt; \
-  --cortex-auth-id &lt;id&gt;</code></pre>
-
-<p><strong>Flag reference:</strong></p>
-<table>
-  <tr><th>Flag</th><th>Default</th><th>Description</th></tr>
-  <tr><td><code>--source</code></td><td><em>(required)</em></td><td><code>aws</code> or <code>azure</code></td></tr>
-  <tr><td><code>--dry-run</code></td><td>on</td><td>Preview payload — no POST to Cortex</td></tr>
-  <tr><td><code>--post</code></td><td>off</td><td>Submit all batches to Cortex XDR</td></tr>
-  <tr><td><code>--region</code></td><td><code>us-east-1</code></td><td>AWS region for Inspector2 (AWS only)</td></tr>
-  <tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severities (AWS only). Valid: <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code></td></tr>
-  <tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses (AWS only). Valid: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code></td></tr>
-  <tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Only collect findings updated in the last N hours. Default <code>720</code> matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use <code>12</code> to match Lambda delta behaviour. <code>0</code> = no time filter. (AWS only)</td></tr>
-  <tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr>
-  <tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr>
-  <tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr>
-</table>
-
-</div>
+  --cortex-auth-id &lt;id&gt;
+</code></pre>
+<h3 id="azure-defender">Azure Defender</h3>
+<pre><code class="language-bash"># Azure (no severity/status/hours flags — not applicable)
+python3 scripts/integration_test.py --source azure --dry-run
+python3 scripts/integration_test.py --source azure --post
+</code></pre>
+<h3 id="tenable-vulnerability-management">Tenable Vulnerability Management</h3>
+<pre><code class="language-bash"># Dry run — 30-day delta (default), medium/high/critical (default)
+python3 scripts/integration_test.py --source tenable --dry-run \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt;
+<h1 id="first-bulk-import---disable-time-filter-to-export-all-findings">First bulk import — disable time filter to export all findings</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 0 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key &lt;key&gt; \
+  --cortex-auth-id &lt;id&gt;
+<h1 id="delta-run---last-6-hours">Delta run — last 6 hours</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 6
+<h1 id="critical-and-high-only">Critical and high only</h1>
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key &lt;access_key&gt; \
+  --tenable-secret-key &lt;secret_key&gt; \
+  --hours 6 \
+  --severities HIGH,CRITICAL
+<h1 id="use-env-vars-for-credentials">Use env vars for credentials</h1>
+TENABLE_ACCESS_KEY=... TENABLE_SECRET_KEY=... \
+  python3 scripts/integration_test.py --source tenable --post --hours 6
+</code></pre>
+<h3 id="flag-reference">Flag reference</h3>
+<table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--source</code></td><td><em>(required)</em></td><td><code>aws</code>, <code>azure</code>, or <code>tenable</code></td></tr><tr><td><code>--dry-run</code></td><td>on</td><td>Preview payload — no POST to Cortex</td></tr><tr><td><code>--post</code></td><td>off</td><td>Submit all batches to Cortex XDR</td></tr><tr><td><code>--region</code></td><td><code>AWS_DEFAULT_REGION</code> or <code>us-east-1</code></td><td>AWS region for Inspector2 (AWS only)</td></tr><tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severity levels. For AWS: <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code>. For Tenable: same values, case-insensitive. (Not used for Azure)</td></tr><tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated Inspector2 finding statuses. Valid: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code>. (AWS only)</td></tr><tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use <code>6</code> to match Lambda delta behaviour. <code>0</code> = no time filter (full export — use for first Tenable bulk import). (Not used for Azure)</td></tr><tr><td><code>--tenable-access-key</code></td><td><code>TENABLE_ACCESS_KEY</code> env var</td><td>Tenable API access key (Tenable only)</td></tr><tr><td><code>--tenable-secret-key</code></td><td><code>TENABLE_SECRET_KEY</code> env var</td><td>Tenable API secret key (Tenable only)</td></tr><tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr><tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr><tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr></tbody></table>
+<p><strong>Valid <code>--severities</code> values (AWS):</strong> <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code></p>
+<p><strong>Valid <code>--severities</code> values (Tenable):</strong> <code>info</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>critical</code> (case-insensitive)</p>
+<p><strong>Valid <code>--statuses</code> values (AWS):</strong> <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code></p>
 </body>
 </html>

@@ -1,14 +1,14 @@
 # Bring Your Own Build - Scanner
 
-Pushes vulnerability findings from **AWS Inspector2** and **Azure Defender for Cloud** to **Cortex XDR** via the Bring Your Own Scanner (BYOS) API.
+Pushes vulnerability findings from **AWS Inspector2**, **Azure Defender for Cloud**, and **Tenable Vulnerability Management** to **Cortex XDR** via the Bring Your Own Scanner (BYOS) API.
 
 ```
-AWS Inspector2  ──→  Lambda (Python 3.12)  ──┐
-                                              ├──→  Cortex XDR  (BYOS API)
-Azure Defender  ──→  Azure Function (Python 3.12) ─┘
+AWS Inspector2         ──→  Lambda (Python 3.12)       ──┐
+Azure Defender         ──→  Azure Function (Python 3.12) ─┼──→  Cortex XDR  (BYOS API)
+Tenable Vulnerability  ──→  integration_test.py / Lambda ─┘
 ```
 
-Each function runs on a **6-hour schedule** and also triggers in real time on new findings (EventBridge / Event Grid). Credentials are stored in cloud-native secrets stores — no secrets in code or environment variables.
+The AWS Lambda runs on a **6-hour schedule** (4 EventBridge rules, one per severity, staggered 30 min apart) and also triggers in real time on new findings. The Azure Function runs on a timer and Event Grid trigger. Tenable exports are run via the integration test script for the initial bulk import and can be wired to a Lambda or cron for delta runs. Credentials are stored in cloud-native secrets stores — no secrets in code or environment variables.
 
 ---
 
@@ -246,6 +246,14 @@ Global resources (destroyed last — shared across all regions):
   - [AWS — regional](#aws--regional-terraformawsregional)
 - [Environment variables reference](#environment-variables-reference)
 - [Asset tags sent to Cortex XDR](#asset-tags-sent-to-cortex-xdr)
+- [Tenable Vulnerability Management](#tenable-vulnerability-management)
+  - [How it works](#how-it-works)
+  - [Tenable credentials](#tenable-credentials)
+  - [Tenable environment variables](#tenable-environment-variables)
+  - [First bulk import](#first-bulk-import)
+  - [Ongoing delta runs](#ongoing-delta-runs)
+  - [Tenable → Cortex field mapping](#tenable--cortex-field-mapping)
+  - [Tenable asset tags](#tenable-asset-tags)
 - [Development setup](#development-setup)
 - [Running tests](#running-tests)
 - [Integration test](#integration-test)
@@ -269,14 +277,15 @@ Global resources (destroyed last — shared across all regions):
 ```
 byob_core/                  shared Python library
   collectors/
-    aws_inspector.py        AWS Inspector2 collector (status + severity filters)
+    aws_inspector.py        AWS Inspector2 collector (status + severity + time filters)
     azure_defender.py       Azure Defender (Resource Graph) collector
+    tenable_vm.py           Tenable VM vulnerability export collector (async export)
   cortex_client.py          Cortex BYOS POST + job status check
   models.py                 RawFinding, Credentials, JobResult dataclasses
-  normalizer.py             field mapping, 50-asset batching, 30-day age filter
+  normalizer.py             field mapping, batching, 30-day age filter
   secrets.py                credential loader (Secrets Manager or Key Vault)
 aws_lambda/
-  handler.py                Lambda entry point
+  handler.py                Lambda entry point (AWS Inspector2 + EventBridge input)
   requirements.txt
 azure_function/
   function_app.py           Azure Function entry point (timer + event grid)
@@ -285,11 +294,11 @@ azure_function/
 terraform/
   aws/
     global/                 IAM role + policy (created once per account)
-    regional/               Lambda, EventBridge, Secrets Manager (per region)
+    regional/               Lambda, EventBridge rules (4 × severity), Secrets Manager
   azure/                    Function App, Key Vault, Event Grid, Managed Identity
 scripts/
   deploy.sh                 interactive one-command deployment
-  integration_test.py       dry-run / live test helper
+  integration_test.py       dry-run / live test helper (aws, azure, tenable)
 tests/                      unit tests (pytest)
 ```
 
@@ -331,14 +340,12 @@ The script will prompt for:
 - Cortex API URL
 - AWS region *(default: `us-east-1`)*
 - Secrets Manager secret name *(default: `byob/cortex`)*
-- Inspector2 finding statuses to collect *(default: `ACTIVE`)*
-- Inspector2 severities to collect *(default: `MEDIUM,HIGH,CRITICAL`)*
 
 Then it will:
 
 1. Build `dist/byob_lambda.zip` (Lambda-compatible package)
 2. Run `terraform apply` → `terraform/aws/global/` (IAM role — once per account)
-3. Per region: `terraform apply` → `terraform/aws/regional/` (Lambda, EventBridge, Secrets Manager)
+3. Per region: `terraform apply` → `terraform/aws/regional/` (Lambda, 4 EventBridge rules, Secrets Manager)
 4. Per region: Store credentials in AWS Secrets Manager
 
 ### Azure
@@ -387,8 +394,8 @@ Runs the AWS flow then the Azure flow. Cortex credentials are prompted once and 
 | Cortex API URL | — | e.g. `api-tenant.xdr.us.paloaltonetworks.com` |
 | AWS region(s) | `us-east-1` | Single value or comma-separated list |
 | Secret name | `byob/cortex` | Secrets Manager path for the credentials JSON |
-| Inspector2 statuses | `ACTIVE` | Comma-separated: `ACTIVE`, `SUPPRESSED`, `CLOSED` |
-| Inspector2 severities | `MEDIUM,HIGH,CRITICAL` | Comma-separated: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
+
+> **Note:** Severity and status filters are no longer prompted during deploy. They are passed per-execution via the 4 EventBridge rules (one per severity level: CRITICAL, HIGH, MEDIUM, LOW), each with a staggered schedule so only one Lambda runs at a time and Cortex rate limits are respected.
 
 **Steps performed:**
 
@@ -404,7 +411,8 @@ Runs the AWS flow then the Azure flow. Cortex credentials are prompted once and 
 
 [3/4]  terraform workspace select <region>
        terraform -chdir=terraform/aws/regional apply  (once per region)
-         Creates: Lambda function, EventBridge schedule,
+         Creates: Lambda function,
+                  4 EventBridge rules (byob-scanner-critical/high/medium/low),
                   Secrets Manager secret (placeholder)
 
 [4/4]  aws secretsmanager put-secret-value  --region <region>
@@ -477,10 +485,19 @@ One Terraform workspace per region.
 | `lambda_zip_path` | `../../../dist/byob_lambda.zip` | Path to the built Lambda zip |
 | `lambda_role_arn` | *(required)* | ARN from the global module output |
 | `cortex_secret_name` | `byob/cortex` | Secrets Manager secret name |
-| `schedule_expression` | `rate(6 hours)` | EventBridge cron schedule |
-| `inspector2_statuses` | `ACTIVE` | Comma-separated finding statuses to collect |
-| `inspector2_severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect |
-| `inspector2_lookback_hours` | `12` | Only return findings updated in the last N hours. Lambda default is `12` (tight delta). Code default when env var unset is `720` (30 days — matches Cortex API limit). `0` = no time filter |
+| `inspector2_statuses` | `ACTIVE` | Comma-separated finding statuses; passed to Lambda via each EventBridge rule input payload |
+| `inspector2_lookback_hours` | `6` | Only return findings updated in the last N hours. Lambda default is `6` (runs every 4 hours with a 6-hour window for overlap). Code default when env var unset is `720` (30 days — matches Cortex API limit). `0` = no time filter |
+
+**EventBridge rules created per region:**
+
+| Rule name | Schedule | Severity passed in payload |
+|---|---|---|
+| `byob-scanner-critical` | Every 4 h, on the hour | `CRITICAL` |
+| `byob-scanner-high` | Every 4 h, :30 past the hour | `HIGH` |
+| `byob-scanner-medium` | Every 4 h, 1:00 past the hour | `MEDIUM` |
+| `byob-scanner-low` | Every 4 h, 1:30 past the hour | `LOW` |
+
+Rules are staggered 30 minutes apart so only one Lambda runs at a time, avoiding Cortex rate limits. Each rule passes its severity (and the configured statuses and lookback window) as a static JSON input to the Lambda.
 
 **Outputs:**
 
@@ -488,7 +505,7 @@ One Terraform workspace per region.
 |---|---|
 | `lambda_function_name` | Lambda function name |
 | `lambda_function_arn` | Lambda function ARN |
-| `eventbridge_rule_arn` | Scheduled EventBridge rule ARN |
+| `eventbridge_rule_arns` | Map of severity → EventBridge rule ARN |
 | `secret_arn` | Secrets Manager secret ARN |
 
 ### Azure variables
@@ -526,17 +543,18 @@ These are set automatically by Terraform — no manual configuration needed.
 | Variable | Default | Description |
 |---|---|---|
 | `CORTEX_SECRET_NAME` | *(from deploy)* | Secrets Manager secret name |
-| `INSPECTOR2_STATUSES` | `ACTIVE` | Comma-separated finding statuses to collect. Valid: `ACTIVE`, `SUPPRESSED`, `CLOSED` |
-| `INSPECTOR2_SEVERITIES` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect. Valid: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
-| `INSPECTOR2_LOOKBACK_HOURS` | `12` (Lambda) / `720` (code default) | Only return findings updated in the last N hours. Lambda is set to `12` for a tight 6-hour delta. Code default when unset is `720` (30 days), matching the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to `0` to disable. |
+| `INSPECTOR2_STATUSES` | `ACTIVE` | Comma-separated finding statuses. Valid: `ACTIVE`, `SUPPRESSED`, `CLOSED`. Set at Lambda level as a baseline; each EventBridge rule can override this via its input payload |
+| `INSPECTOR2_LOOKBACK_HOURS` | `6` (Lambda) / `720` (code default) | Only return findings updated in the last N hours. Lambda is set to `6` to match the 4-hour run interval with overlap. Code default when unset is `720` (30 days), matching the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to `0` to disable. |
 
-To change the filters after deployment without redeploying, update the Lambda environment variables directly in the AWS console or via the CLI:
+> **Severity is not an env var.** Each EventBridge rule passes `inspector2_severities` directly in its input payload (e.g. `"CRITICAL"`, `"HIGH"`, etc.), so the Lambda runs four separate scans at different severity tiers without needing four separate Lambda functions.
+
+To change the lookback window or statuses after deployment:
 
 ```bash
 aws lambda update-function-configuration \
   --function-name byob-scanner \
   --region us-east-1 \
-  --environment "Variables={CORTEX_SECRET_NAME=byob/cortex,INSPECTOR2_STATUSES=ACTIVE,INSPECTOR2_SEVERITIES=HIGH,CRITICAL,INSPECTOR2_LOOKBACK_HOURS=12}"
+  --environment "Variables={CORTEX_SECRET_NAME=byob/cortex,INSPECTOR2_STATUSES=ACTIVE,INSPECTOR2_LOOKBACK_HOURS=6}"
 ```
 
 ### Azure Function
@@ -598,13 +616,170 @@ Every asset pushed to Cortex includes cloud metadata tags alongside any user-def
 
 ---
 
+## Tenable Vulnerability Management
+
+### How it works
+
+Tenable uses an **asynchronous export** pattern — no real-time events, just scheduled pulls:
+
+```
+1. POST /vulns/export  →  {"export_uuid": "..."}          (start export with filters)
+2. GET  /vulns/export/{uuid}/status  →  poll every 30 s   (wait for FINISHED)
+3. GET  /vulns/export/{uuid}/chunks/{id}                   (download each chunk)
+4. Parse records → RawFinding → normalizer → Cortex BYOS
+```
+
+Key behaviours:
+- **Delta export**: the `since` filter (Unix timestamp) restricts the export to findings seen on or after a given date, equivalent to the `updatedAt` filter in Inspector2.
+- **One finding per CVE**: a single Tenable plugin can map to multiple CVEs. The collector creates one `RawFinding` per CVE so each vulnerability gets its own `vulnerability_id` entry in Cortex.
+- **Severity sort**: findings are sorted CRITICAL → HIGH → MEDIUM → LOW before normalisation, so the most critical vulnerabilities survive the per-asset 1,000-finding cap.
+- **409 deduplication**: if an identical export is already in progress (Tenable returns HTTP 409), the collector reuses the existing job UUID instead of failing.
+- **States**: only `OPEN` and `REOPENED` findings are exported — `FIXED` findings are not forwarded to Cortex.
+
+### Tenable credentials
+
+The collector reads credentials from environment variables:
+
+| Variable | Description |
+|---|---|
+| `TENABLE_ACCESS_KEY` | Tenable API access key |
+| `TENABLE_SECRET_KEY` | Tenable API secret key |
+
+Create a Tenable API key pair in **Settings → My Account → API Keys** (or ask your Tenable admin). The account needs at least the **Basic** role and **Can View** access on all assets.
+
+### Tenable environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TENABLE_ACCESS_KEY` | *(required)* | Tenable API access key |
+| `TENABLE_SECRET_KEY` | *(required)* | Tenable API secret key |
+| `TENABLE_SEVERITIES` | `medium,high,critical` | Comma-separated severity levels. Valid (lowercase): `info`, `low`, `medium`, `high`, `critical` |
+| `TENABLE_LOOKBACK_HOURS` | `720` (30 days) | Only return findings seen in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to `0` to disable (full export — use for first bulk import). |
+| `TENABLE_BASE_URL` | `https://cloud.tenable.com` | Override for on-premises Tenable Security Center (if applicable) |
+
+### First bulk import
+
+Run once to push all findings from the last 30 days into Cortex:
+
+```bash
+# Dry run first — see what will be posted without sending anything
+python3 scripts/integration_test.py --source tenable --dry-run \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key>
+
+# Full 30-day import (default --hours 720)
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+
+# No time filter — export everything (first import when you want all historical data)
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 0 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+```
+
+### Ongoing delta runs
+
+After the initial import, run with a short lookback window to pick up only new/updated findings:
+
+```bash
+# Delta — last 6 hours (run on a 4-hour schedule with overlap)
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 6
+
+# Critical and high only
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 6 \
+  --severities HIGH,CRITICAL
+```
+
+You can also store the credentials as environment variables and omit the CLI flags:
+
+```bash
+export TENABLE_ACCESS_KEY=<access_key>
+export TENABLE_SECRET_KEY=<secret_key>
+export CORTEX_FQDN=api-tenant.xdr.us.paloaltonetworks.com
+export CORTEX_API_KEY=<key>
+export CORTEX_AUTH_ID=<id>
+
+python3 scripts/integration_test.py --source tenable --post --hours 6
+```
+
+### Tenable → Cortex field mapping
+
+| Tenable field | Cortex / `RawFinding` field | Notes |
+|---|---|---|
+| `asset.uuid` | `asset_id` | Stable UUID — use to match assets across exports |
+| `asset.hostname` / `asset.fqdn[0]` | `asset_name` | Best available display name |
+| `asset.ipv4` | `ipv4` | List |
+| `asset.ipv6` | `ipv6` | List |
+| `asset.fqdn` | `fqdn` | List |
+| `asset.operating_system` | `os_name` | String or list → first value |
+| `asset.tags` + cloud fields | `tags` | See below |
+| `last_found` (Unix seconds) | `last_seen_ms` | Multiplied by 1,000 for milliseconds |
+| `plugin.cve[i]` | `cve_id` | One `RawFinding` per CVE; records with no CVE are skipped |
+| `severity` | `severity` | `critical→CRITICAL`, `high→HIGH`, `medium→MEDIUM`, `low→LOW`, `info→INFORMATIONAL` |
+| `plugin.description` | `description` | Truncated at 1,000 characters |
+| `plugin.id` + `plugin.name` + `cvss3_base_score` | `evidence` | `"Plugin 12345: Apache Log4Shell \| CVSS3: 10.0"` — truncated at 500 chars |
+| `state` + `solution` + `output` | `raw_output` | Truncated at 2,000 characters |
+
+### Tenable asset tags
+
+Tags are sent to Cortex in `key:value` format. Cloud provider metadata is detected automatically from the Tenable asset record.
+
+**All Tenable assets:**
+
+| Tag | Example |
+|---|---|
+| `cloud:tenable_vm` | Always present |
+| User-defined tags from Tenable | `env:production`, `team:platform` |
+
+**AWS assets (when EC2 metadata is present):**
+
+| Tag | Example |
+|---|---|
+| `instance_id:<id>` | `instance_id:i-0abc1234def56789` |
+| `instance_type:<type>` | `instance_type:t3.medium` |
+| `aws_region:<region>` | `aws_region:us-east-1` |
+| `aws_availability_zone:<az>` | `aws_availability_zone:us-east-1a` |
+| `aws_account:<account-id>` | `aws_account:123456789012` |
+
+**Azure assets (when Azure metadata is present):**
+
+| Tag | Example |
+|---|---|
+| `azure_vm_id:<id>` | `azure_vm_id:vm-0abc1234` |
+| `azure_resource_group:<rg>` | `azure_resource_group:my-rg` |
+| `azure_subscription_id:<id>` | `azure_subscription_id:sub-0abc1234` |
+
+**GCP assets (when GCP metadata is present):**
+
+| Tag | Example |
+|---|---|
+| `gcp_project:<project>` | `gcp_project:my-project-123` |
+| `gcp_instance_id:<id>` | `gcp_instance_id:1234567890` |
+| `gcp_zone:<zone>` | `gcp_zone:us-central1-a` |
+
+---
+
 ## Running tests
 
 ```bash
 pytest tests/ -v
 ```
 
-All 25 unit tests run entirely offline — no AWS or Azure credentials required.
+All 79 unit tests run entirely offline — no AWS, Azure, or Tenable credentials required.
 
 ---
 
@@ -612,14 +787,15 @@ All 25 unit tests run entirely offline — no AWS or Azure credentials required.
 
 Connects to real scanner APIs but does **not** POST to Cortex by default.
 
+### AWS Inspector2
+
 ```bash
 # Initial full import — default 30-day window (--hours 720), matches Cortex API limit
 python3 scripts/integration_test.py --source aws  --dry-run
-python3 scripts/integration_test.py --source azure --dry-run
 
-# Tight delta — last 12 hours only (matches Lambda behaviour)
+# Tight delta — last 6 hours only (matches Lambda behaviour)
 python3 scripts/integration_test.py --source aws --dry-run \
-  --hours 12
+  --hours 6
 
 # Override severity filter (one or more comma-separated values)
 python3 scripts/integration_test.py --source aws --dry-run \
@@ -644,35 +820,79 @@ python3 scripts/integration_test.py --source aws --post \
   --cortex-api-key <key> \
   --cortex-auth-id <id>
 
-# Delta run to Cortex (subsequent runs — last 12 hours)
+# Delta run to Cortex (subsequent runs — last 6 hours)
 python3 scripts/integration_test.py --source aws --post \
   --region us-east-1 \
-  --hours 12 \
+  --hours 6 \
   --severities HIGH,CRITICAL \
   --statuses ACTIVE \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key <key> \
   --cortex-auth-id <id>
+```
 
+### Azure Defender
+
+```bash
 # Azure (no severity/status/hours flags — not applicable)
+python3 scripts/integration_test.py --source azure --dry-run
 python3 scripts/integration_test.py --source azure --post
 ```
 
-**Flag reference:**
+### Tenable Vulnerability Management
+
+```bash
+# Dry run — 30-day delta (default), medium/high/critical (default)
+python3 scripts/integration_test.py --source tenable --dry-run \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key>
+
+# First bulk import — disable time filter to export all findings
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 0 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+
+# Delta run — last 6 hours
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 6
+
+# Critical and high only
+python3 scripts/integration_test.py --source tenable --post \
+  --tenable-access-key <access_key> \
+  --tenable-secret-key <secret_key> \
+  --hours 6 \
+  --severities HIGH,CRITICAL
+
+# Use env vars for credentials
+TENABLE_ACCESS_KEY=... TENABLE_SECRET_KEY=... \
+  python3 scripts/integration_test.py --source tenable --post --hours 6
+```
+
+### Flag reference
 
 | Flag | Default | Description |
 |---|---|---|
-| `--source` | *(required)* | `aws` or `azure` |
+| `--source` | *(required)* | `aws`, `azure`, or `tenable` |
 | `--dry-run` | on | Preview payload — no POST to Cortex |
 | `--post` | off | Submit all batches to Cortex XDR |
 | `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2 (AWS only) |
-| `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated Inspector2 severities (AWS only) |
-| `--statuses` | `ACTIVE` | Comma-separated Inspector2 finding statuses (AWS only) |
-| `--hours` | `720` (30 days) | Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use `12` to match Lambda delta behaviour. `0` = no time filter. (AWS only) |
+| `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. For AWS: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED`. For Tenable: same values, case-insensitive. (Not used for Azure) |
+| `--statuses` | `ACTIVE` | Comma-separated Inspector2 finding statuses. Valid: `ACTIVE`, `SUPPRESSED`, `CLOSED`. (AWS only) |
+| `--hours` | `720` (30 days) | Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use `6` to match Lambda delta behaviour. `0` = no time filter (full export — use for first Tenable bulk import). (Not used for Azure) |
+| `--tenable-access-key` | `TENABLE_ACCESS_KEY` env var | Tenable API access key (Tenable only) |
+| `--tenable-secret-key` | `TENABLE_SECRET_KEY` env var | Tenable API secret key (Tenable only) |
 | `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |
 | `--cortex-api-key` | `CORTEX_API_KEY` env var | Cortex API key |
 | `--cortex-auth-id` | `CORTEX_AUTH_ID` env var | Cortex API key ID |
 
-Valid `--severities` values: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED`
+**Valid `--severities` values (AWS):** `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED`
 
-Valid `--statuses` values: `ACTIVE`, `SUPPRESSED`, `CLOSED`
+**Valid `--severities` values (Tenable):** `info`, `low`, `medium`, `high`, `critical` (case-insensitive)
+
+**Valid `--statuses` values (AWS):** `ACTIVE`, `SUPPRESSED`, `CLOSED`
