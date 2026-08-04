@@ -249,6 +249,13 @@ Global resources (destroyed last — shared across all regions):
 - [Development setup](#development-setup)
 - [Running tests](#running-tests)
 - [Integration test](#integration-test)
+- [Queued batch push](#queued-batch-push)
+  - [When to use it](#when-to-use-it)
+  - [Typical workflow](#typical-workflow)
+  - [Resuming after an error](#resuming-after-an-error)
+  - [Other modes](#other-modes)
+  - [Batch push flag reference](#batch-push-flag-reference)
+  - [Error handling behaviour](#error-handling-behaviour)
 
 ---
 
@@ -290,6 +297,7 @@ terraform/
 scripts/
   deploy.sh                 interactive one-command deployment
   integration_test.py       dry-run / live test helper
+  batch_push.py             queued batch push with resume support
 tests/                      unit tests (pytest)
 ```
 
@@ -676,3 +684,171 @@ python3 scripts/integration_test.py --source azure --post
 Valid `--severities` values: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED`
 
 Valid `--statuses` values: `ACTIVE`, `SUPPRESSED`, `CLOSED`
+
+---
+
+## Queued batch push
+
+`scripts/batch_push.py` solves a problem that `integration_test.py --post` cannot: **what happens if Cortex errors or rate-limits midway through pushing a large set of findings?** With the integration test you would have to re-query Inspector2 or Azure from the beginning and re-send every batch. The queued batch push avoids that by saving every batch as a local JSON file first, then pushing one file at a time and **deleting it only after Cortex accepts it**. If the run is interrupted for any reason, the remaining files stay on disk and the next run resumes exactly where it stopped.
+
+### When to use it
+
+| Situation | Recommended tool |
+|---|---|
+| Quick dry-run to inspect payload | `integration_test.py --dry-run` |
+| Small delta (a few batches, low risk of rate limit) | `integration_test.py --post` |
+| **Large first import** (many batches, high risk of timeout / rate limit) | **`batch_push.py`** |
+| **Re-sending after a Cortex error** | **`batch_push.py`** (resume from saved files) |
+| Scheduled Lambda runs | Neither — Lambda handles this automatically |
+
+### Typical workflow
+
+**Step 1 — download findings and push (interactive)**
+
+```bash
+pip install -e ".[dev]"   # first time only
+
+python3 scripts/batch_push.py --source aws \
+  --region us-east-1 \
+  --severities HIGH,CRITICAL \
+  CORTEX_SECRET_NAME=byob-scanner/cortex
+```
+
+Or with individual credentials:
+
+```bash
+python3 scripts/batch_push.py --source aws \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+```
+
+The script:
+
+1. Verifies Cortex credentials **before** collecting any data
+2. Downloads findings from Inspector2
+3. Saves each batch as `.byob-batches/batch_0001.json`, `batch_0002.json`, …
+4. Prints a summary showing assets and vulns per file
+5. Asks `Push N batch(es) to Cortex now? [Y/n]:`
+6. Pushes batches one at a time — deleting each file on success
+7. Cleans up the `.byob-batches/` directory when all files are gone
+
+Example output:
+
+```
+INFO: Cortex credentials: secret 'byob-scanner/cortex' verified.
+INFO: Collecting findings from aws ...
+INFO: Collected 2,847 findings.
+INFO: Saving 3 batch file(s) to '.byob-batches' ...
+INFO:   batch_0001.json — 40 asset(s), 1,024 vuln(s)
+INFO:   batch_0002.json — 40 asset(s),   998 vuln(s)
+INFO:   batch_0003.json — 18 asset(s),   825 vuln(s)
+
+Push 3 batch(es) to Cortex now? [Y/n]: Y
+
+INFO: ─── Pushing batch 1/3: batch_0001.json
+INFO:   Accepted | job_id=abc-123  status=DONE  assets=40  vulns=1024
+INFO:   Deleted batch_0001.json
+INFO: ─── Pushing batch 2/3: batch_0002.json
+INFO:   Accepted | job_id=abc-124  status=DONE  assets=40  vulns=998
+INFO:   Deleted batch_0002.json
+INFO: ─── Pushing batch 3/3: batch_0003.json
+INFO:   Accepted | job_id=abc-125  status=DONE  assets=18  vulns=825
+INFO:   Deleted batch_0003.json
+INFO: All batches pushed successfully.
+```
+
+### Resuming after an error
+
+If Cortex returns a rate-limit error (or any other failure) mid-push, the script stops immediately and leaves all remaining files on disk:
+
+```
+ERROR: Rate limit exhausted on batch batch_0002.json.
+       Remaining batches (2 of 3) are still saved in '.byob-batches'.
+       Re-run this script to continue.
+```
+
+Simply re-run the same command. The script detects the leftover files and prompts:
+
+```
+INFO: Found 2 pending batch file(s) (of 3 total) — 58 asset(s), 1,823 vuln(s) waiting.
+
+  Options:
+    [Y] / Enter  — continue pushing pending batches
+    [r]          — delete pending batches and re-download fresh findings
+    [a]          — abort (leave pending batches, exit now)
+
+  Choice [Y/r/a]: Y
+```
+
+Choosing **Y** (or pressing Enter) resumes from `batch_0002.json` — no re-querying Inspector2.
+Choosing **r** discards the saved files and starts a fresh download.
+
+### Other modes
+
+**Download only — inspect files before committing to push:**
+
+```bash
+python3 scripts/batch_push.py --source aws --download-only
+# Saves batch files, then exits.
+# Re-run without --download-only (or with --push-only) when ready to push.
+```
+
+**Push only — use a previously downloaded set:**
+
+```bash
+python3 scripts/batch_push.py --push-only \
+  --cortex-fqdn api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+```
+
+**Non-interactive (for scripting / CI):**
+
+```bash
+# --yes skips all prompts: auto-continue pending batches, auto-push after download
+python3 scripts/batch_push.py --source aws --yes \
+  CORTEX_SECRET_NAME=byob-scanner/cortex
+```
+
+**Specify a custom batch directory:**
+
+```bash
+python3 scripts/batch_push.py --source aws --batch-dir /tmp/inspector-batches
+```
+
+**Full import — disable time filter:**
+
+```bash
+# --hours 0 exports all findings (not just the 30-day default)
+python3 scripts/batch_push.py --source aws --hours 0
+```
+
+### Batch push flag reference
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source` | *(required unless `--push-only`)* | `aws` or `azure` — which scanner to collect from |
+| `--push-only` | off | Skip download; push existing batch files only. Errors if no files exist. |
+| `--download-only` | off | Save batches to disk and exit. Re-run without this flag to push. |
+| `--yes` / `-y` | off | Non-interactive: auto-continue pending batches and auto-push after download |
+| `--batch-dir` | `.byob-batches` | Directory where batch JSON files are stored |
+| `--hours` | `720` (30 days) | Lookback window in hours. `0` = no time filter (full export). AWS only. |
+| `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. AWS only. |
+| `--statuses` | `ACTIVE` | Comma-separated finding statuses. AWS only. |
+| `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2. AWS only. |
+| `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |
+| `--cortex-api-key` | `CORTEX_API_KEY` env var | Cortex API key |
+| `--cortex-auth-id` | `CORTEX_AUTH_ID` env var | Cortex API key ID |
+
+Cortex credentials can also be supplied via `CORTEX_SECRET_NAME` (AWS Secrets Manager) or `CORTEX_SECRET_NAME` + `CORTEX_KEYVAULT_URL` (Azure Key Vault). The script verifies the secret is accessible **before** starting the download.
+
+### Error handling behaviour
+
+| Error | What happens |
+|---|---|
+| Cortex 429 — rate limit exhausted (after 30 s / 60 s / 300 s retries) | Stops. Remaining batch files stay on disk. Re-run to resume. |
+| Cortex 422 — validation error on one batch | Skips that batch and continues pushing the rest. |
+| Any other network or HTTP error | Stops. Remaining files stay on disk. Re-run to resume. |
+| Batch file unreadable / corrupt | Logs the error, skips that file, continues with the rest. |
+| All batches pushed successfully | Batch files and `.byob-batches/` directory are deleted automatically. |

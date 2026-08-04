@@ -43,3 +43,4 @@ docs/superpowers/
 
 # Stray / duplicate files
 .gitingore
+.byob-batches/
