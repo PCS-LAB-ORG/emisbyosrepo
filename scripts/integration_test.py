@@ -36,6 +36,33 @@ Usage:
     # Post using a secret already stored in AWS Secrets Manager:
     CORTEX_SECRET_NAME=byob-scanner/cortex \\
         python3 scripts/integration_test.py --source aws --post
+
+    # -------------------------------------------------------------------------
+    # Tenable Vulnerability Management
+    # -------------------------------------------------------------------------
+
+    # Dry run — 30-day delta (default), medium/high/critical (default):
+    python3 scripts/integration_test.py --source tenable --dry-run \\
+        --tenable-access-key <access_key> --tenable-secret-key <secret_key>
+
+    # First bulk import — disable time filter so all findings are exported:
+    python3 scripts/integration_test.py --source tenable --post \\
+        --tenable-access-key <access_key> --tenable-secret-key <secret_key> \\
+        --hours 0
+
+    # Delta — last 6 hours only:
+    python3 scripts/integration_test.py --source tenable --post \\
+        --tenable-access-key <access_key> --tenable-secret-key <secret_key> \\
+        --hours 6
+
+    # Filter by severity:
+    python3 scripts/integration_test.py --source tenable --dry-run \\
+        --tenable-access-key <access_key> --tenable-secret-key <secret_key> \\
+        --severities HIGH,CRITICAL
+
+    # Use env vars for Tenable credentials:
+    TENABLE_ACCESS_KEY=... TENABLE_SECRET_KEY=... \\
+        python3 scripts/integration_test.py --source tenable --post
 """
 from __future__ import annotations
 
@@ -57,7 +84,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--source",
-        choices=["aws", "azure"],
+        choices=["aws", "azure", "tenable"],
         required=True,
         help="Vulnerability source to collect from.",
     )
@@ -80,7 +107,7 @@ def main() -> None:
         help=(
             "AWS region for Inspector2 (e.g. us-east-1). "
             "Falls back to AWS_DEFAULT_REGION env var, then us-east-1. "
-            "Ignored for --source azure."
+            "Ignored for --source azure or --source tenable."
         ),
     )
     parser.add_argument(
@@ -88,8 +115,9 @@ def main() -> None:
         default=None,
         metavar="SEVERITIES",
         help=(
-            "Comma-separated Inspector2 severities to collect. "
-            "Valid: INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL, UNTRIAGED. "
+            "Comma-separated severity levels to collect. "
+            "For --source aws: INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL, UNTRIAGED. "
+            "For --source tenable: info, low, medium, high, critical (case-insensitive). "
             "Default: MEDIUM,HIGH,CRITICAL. "
             "Ignored for --source azure."
         ),
@@ -102,7 +130,7 @@ def main() -> None:
             "Comma-separated Inspector2 finding statuses to collect. "
             "Valid: ACTIVE, SUPPRESSED, CLOSED. "
             "Default: ACTIVE. "
-            "Ignored for --source azure."
+            "Applies to --source aws only."
         ),
     )
     parser.add_argument(
@@ -114,10 +142,23 @@ def main() -> None:
             "Only collect findings updated in the last N hours. "
             "Default: 720 (30 days) — matches the Cortex API hard limit, so findings "
             "older than this are rejected anyway. "
-            "Set to 12 to match the Lambda delta behaviour. "
-            "Set to 0 to disable the time filter entirely (no upper bound). "
+            "Set to 6-12 to match the Lambda delta behaviour. "
+            "Set to 0 to disable the time filter entirely — use this for the first "
+            "bulk import from Tenable so all findings are exported. "
             "Ignored for --source azure."
         ),
+    )
+    parser.add_argument(
+        "--tenable-access-key",
+        default=None,
+        metavar="KEY",
+        help="Tenable API access key. Sets TENABLE_ACCESS_KEY. Required for --source tenable.",
+    )
+    parser.add_argument(
+        "--tenable-secret-key",
+        default=None,
+        metavar="KEY",
+        help="Tenable API secret key. Sets TENABLE_SECRET_KEY. Required for --source tenable.",
     )
     parser.add_argument(
         "--cortex-fqdn",
@@ -139,7 +180,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Apply Inspector2 filter overrides before the collector reads env vars.
+    # Apply source-specific filter overrides before the collector reads env vars.
     if args.source == "aws":
         if args.severities:
             os.environ["INSPECTOR2_SEVERITIES"] = args.severities.upper()
@@ -154,9 +195,27 @@ def main() -> None:
             os.environ["INSPECTOR2_LOOKBACK_HOURS"] = "0"
             logger.info("Inspector2 lookback:   disabled (no time filter)")
 
+    if args.source == "tenable":
+        if args.tenable_access_key:
+            os.environ["TENABLE_ACCESS_KEY"] = args.tenable_access_key
+        if args.tenable_secret_key:
+            os.environ["TENABLE_SECRET_KEY"] = args.tenable_secret_key
+        if args.severities:
+            os.environ["TENABLE_SEVERITIES"] = args.severities.lower()
+            logger.info("Tenable severities:    %s", os.environ["TENABLE_SEVERITIES"])
+        if args.hours > 0:
+            os.environ["TENABLE_LOOKBACK_HOURS"] = str(args.hours)
+            logger.info("Tenable lookback:      last %d hours", args.hours)
+        else:
+            os.environ["TENABLE_LOOKBACK_HOURS"] = "0"
+            logger.info("Tenable lookback:      disabled (full export — use for first bulk import)")
+
     if args.source == "aws":
         from byob_core.collectors.aws_inspector import collect  # noqa: PLC0415
         source_key = "aws_inspector"
+    elif args.source == "tenable":
+        from byob_core.collectors.tenable_vm import collect  # noqa: PLC0415
+        source_key = "tenable_vm"
     else:
         from byob_core.collectors.azure_defender import collect  # noqa: PLC0415
         source_key = "azure_defender"

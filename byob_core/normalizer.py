@@ -20,6 +20,7 @@ THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 _VENDOR_MAP = {
     "aws_inspector": ("AWS", "Inspector2"),
     "azure_defender": ("Microsoft", "DefenderForCloud"),
+    "tenable_vm": ("Tenable", "VulnerabilityManagement"),
 }
 
 

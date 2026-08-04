@@ -82,13 +82,13 @@ def test_normalize_filters_old_findings():
 
 
 def test_normalize_batches_assets_across_multiple_batches():
-    # 25 assets with the batch cap at 10 → 3 batches (10, 10, 5)
-    findings = [_make_finding(asset_id=f"i-{n}") for n in range(25)]
+    # 105 assets with the batch cap at 40 → 3 batches (40, 40, 25)
+    findings = [_make_finding(asset_id=f"i-{n}") for n in range(105)]
     batches = normalize(findings, "aws_inspector")
     assert len(batches) == 3
-    assert len(batches[0]["assets"]) == 10
-    assert len(batches[1]["assets"]) == 10
-    assert len(batches[2]["assets"]) == 5
+    assert len(batches[0]["assets"]) == 40
+    assert len(batches[1]["assets"]) == 40
+    assert len(batches[2]["assets"]) == 25
 
 
 def test_normalize_raw_output_truncated_to_2000():

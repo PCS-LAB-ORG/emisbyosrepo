@@ -18,7 +18,7 @@ class RawFinding:
     description: str
     evidence: str
     raw_output: str
-    source: str  # "aws_inspector" | "azure_defender"
+    source: str  # "aws_inspector" | "azure_defender" | "tenable_vm"
 
 
 @dataclass
