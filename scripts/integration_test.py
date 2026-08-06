@@ -130,6 +130,19 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--coverage-hours",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Only include assets that Inspector2 has scanned in the last N hours "
+            "(uses the list-coverage API). "
+            "Default: 720 (30 days). "
+            "Example: --coverage-hours 72 limits to assets scanned in the last 3 days. "
+            "Overrides the INSPECTOR2_COVERAGE_HOURS env var. AWS only."
+        ),
+    )
+    parser.add_argument(
         "--cortex-fqdn",
         default=None,
         metavar="FQDN",
@@ -197,6 +210,9 @@ def main() -> None:
     collect_kwargs: dict = {"mode": "scheduled"}
     if args.source == "aws" and args.region:
         collect_kwargs["region"] = args.region
+    if args.source == "aws" and args.coverage_hours is not None:
+        collect_kwargs["coverage_hours"] = args.coverage_hours
+        logger.info("Coverage filter window: last %d hours.", args.coverage_hours)
     findings = collect(**collect_kwargs)
     logger.info("Collected %d findings", len(findings))
 

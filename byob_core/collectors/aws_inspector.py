@@ -38,6 +38,26 @@ _DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 #                              Set to 12 on Lambda (runs every 6 hours) for a
 #                              tight delta with overlap.  Set to 0 to disable
 #                              the time filter entirely (no upper bound).
+#
+#   INSPECTOR2_COVERAGE_FILTER  "true" (default) | "false"
+#                              When true, list-coverage is called to identify
+#                              resources that Inspector2 has actually scanned
+#                              in the coverage window.  Findings for resources
+#                              that have NOT been scanned in that window are
+#                              dropped before normalisation.  This is the most
+#                              accurate way to exclude stale/terminated assets:
+#                              lastScannedAt reflects the actual scan clock,
+#                              not the vulnerability finding age.
+#                              Set to "false" to skip the coverage pre-check
+#                              (e.g. if the IAM role lacks
+#                              inspector2:ListCoverage permission).
+#
+#   INSPECTOR2_COVERAGE_HOURS  integer; default: 720 (30 days)
+#                              The lastScannedAt window used by list-coverage.
+#                              Only resources scanned within the last N hours
+#                              are considered active.  Set to 72 to restrict
+#                              to assets scanned in the last 3 days.
+#                              Ignored when INSPECTOR2_COVERAGE_FILTER=false.
 # ---------------------------------------------------------------------------
 _VALID_STATUSES = {"ACTIVE", "SUPPRESSED", "CLOSED"}
 _VALID_SEVERITIES = {"INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNTRIAGED"}
@@ -88,6 +108,72 @@ def _lookback_hours() -> int:
         return 720
 
 
+def _coverage_filter_enabled() -> bool:
+    """Return True unless INSPECTOR2_COVERAGE_FILTER is explicitly set to 'false'."""
+    return os.environ.get("INSPECTOR2_COVERAGE_FILTER", "true").strip().lower() != "false"
+
+
+def _coverage_hours() -> int:
+    """Return INSPECTOR2_COVERAGE_HOURS as a positive int.
+
+    Controls the ``lastScannedAt`` window passed to ``list_coverage``.
+    Default is 720 (30 days) — resources not scanned in this window are
+    considered stale.  Set to a smaller value (e.g. 72) to restrict to
+    assets scanned very recently.
+    """
+    raw = os.environ.get("INSPECTOR2_COVERAGE_HOURS", "720").strip()
+    try:
+        val = int(raw)
+        return max(val, 1)
+    except ValueError:
+        logger.warning(
+            "INSPECTOR2_COVERAGE_HOURS=%r is not an integer — defaulting to 720 (30 days)", raw
+        )
+        return 720
+
+
+def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
+    """Return the set of resource IDs that Inspector2 has scanned within *lookback_hours*.
+
+    Uses the ``list_coverage`` API with a ``lastScannedAt`` filter so that only
+    resources with a confirmed recent scan are returned.  Resources that have been
+    terminated or removed from Inspector2's scope will have an old (or absent)
+    ``lastScannedAt`` and will not appear in the result set.
+
+    If the call fails for any reason (e.g. missing IAM permission) a warning is
+    logged and an empty set is returned — the caller should treat that as "no
+    filter applied" to avoid silently dropping all findings.
+    """
+    now = datetime.now(tz=timezone.utc)
+    cutoff = datetime.fromtimestamp(now.timestamp() - lookback_hours * 3600, tz=timezone.utc)
+    try:
+        paginator = client.get_paginator("list_coverage")
+        resource_ids: set[str] = set()
+        for page in paginator.paginate(
+            filterCriteria={
+                "lastScannedAt": [{"startInclusive": cutoff, "endInclusive": now}],
+            },
+            PaginationConfig={"PageSize": 200},
+        ):
+            for resource in page.get("coveredResources", []):
+                rid = resource.get("resourceId", "")
+                if rid:
+                    resource_ids.add(rid)
+        logger.info(
+            "Coverage filter: %d resource(s) scanned in the last %d hours.",
+            len(resource_ids), lookback_hours,
+        )
+        return resource_ids
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "list_coverage call failed (%s) — coverage filter skipped. "
+            "Grant inspector2:ListCoverage to the IAM role, or set "
+            "INSPECTOR2_COVERAGE_FILTER=false to suppress this warning.",
+            exc,
+        )
+        return set()
+
+
 def collect(
     mode: str,
     finding_arn: str | None = None,
@@ -95,13 +181,14 @@ def collect(
     severities: str | None = None,
     statuses: str | None = None,
     lookback_hours: int | None = None,
+    coverage_hours: int | None = None,
 ) -> list[RawFinding]:
     """Collect findings.
 
-    ``severities``, ``statuses``, and ``lookback_hours`` may be passed
-    explicitly (e.g. from an EventBridge input payload) and take priority
-    over the corresponding env vars.  When not provided the env vars are
-    read as normal.
+    ``severities``, ``statuses``, ``lookback_hours``, and ``coverage_hours``
+    may be passed explicitly (e.g. from an EventBridge input payload) and take
+    priority over the corresponding env vars.  When not provided the env vars
+    are read as normal.
     """
     client = boto3.client("inspector2", region_name=region or _DEFAULT_REGION)
 
@@ -111,9 +198,9 @@ def collect(
         resolved_statuses = _parse_env_list("INSPECTOR2_STATUSES", _VALID_STATUSES, ["ACTIVE"])
 
     if severities is not None:
-        resolved_severities = _parse_raw_list(severities, _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL"], "severities")
+        resolved_severities = _parse_raw_list(severities, _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL","LOW"], "severities")
     else:
-        resolved_severities = _parse_env_list("INSPECTOR2_SEVERITIES", _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL"])
+        resolved_severities = _parse_env_list("INSPECTOR2_SEVERITIES", _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL","LOW"])
 
     resolved_hours = _lookback_hours() if lookback_hours is None else max(int(lookback_hours), 0)
 
@@ -129,7 +216,27 @@ def collect(
         resolved_hours if resolved_hours > 0 else "disabled (full scan)",
         source,
     )
-    return _collect_with_retry(client, mode, finding_arn, resolved_statuses, resolved_severities, resolved_hours)
+
+    # ------------------------------------------------------------------
+    # Coverage pre-filter: drop findings for assets that haven't been
+    # scanned by Inspector2 within the coverage window.  This is more
+    # reliable than relying on finding timestamps because list-coverage
+    # reflects the actual scan schedule — a terminated or out-of-scope
+    # EC2 instance will not appear here even if its findings are ACTIVE.
+    # ------------------------------------------------------------------
+    active_ids: set[str] | None = None
+    if _coverage_filter_enabled():
+        resolved_coverage_hours = _coverage_hours() if coverage_hours is None else max(int(coverage_hours), 1)
+        logger.info("Coverage filter window: last %d hours.", resolved_coverage_hours)
+        active_ids = _active_resource_ids(client, lookback_hours=resolved_coverage_hours)
+        if not active_ids:
+            logger.warning(
+                "Coverage filter returned zero resources — filter will not be applied. "
+                "All findings will be included regardless of scan age."
+            )
+            active_ids = None  # treat as disabled
+
+    return _collect_with_retry(client, mode, finding_arn, resolved_statuses, resolved_severities, resolved_hours, active_ids)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
@@ -140,6 +247,7 @@ def _collect_with_retry(
     statuses: list[str],
     severities: list[str],
     lookback_hours: int,
+    active_ids: set[str] | None = None,
 ) -> list[RawFinding]:
     paginator = client.get_paginator("list_findings")
     kwargs: dict[str, Any] = {"PaginationConfig": {"PageSize": 100}}
@@ -193,6 +301,13 @@ def _collect_with_retry(
                 continue
             parsed = _parse(raw)
             if parsed:
+                if active_ids is not None and parsed.asset_id not in active_ids:
+                    logger.debug(
+                        "Coverage filter: skipped finding for resource '%s' "
+                        "(not scanned in last 30 days).",
+                        parsed.asset_id,
+                    )
+                    continue
                 findings.append(parsed)
                 page_kept += 1
         logger.info(
@@ -202,8 +317,10 @@ def _collect_with_retry(
 
     logger.info(
         "Inspector2 collection done: %d raw findings — %d kept, %d skipped (no CVE/package), "
-        "%d skipped (no resource)  [mode=%s, pages=%d]",
-        raw_total, len(findings), skipped_no_cve, skipped_no_resource, mode, page_num,
+        "%d skipped (no resource)%s  [mode=%s, pages=%d]",
+        raw_total, len(findings), skipped_no_cve, skipped_no_resource,
+        f", coverage filter active ({len(active_ids)} resources)" if active_ids is not None else "",
+        mode, page_num,
     )
     if skipped_no_cve:
         logger.warning(

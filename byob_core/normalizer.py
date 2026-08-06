@@ -25,6 +25,16 @@ _VENDOR_MAP = {
 
 _TAG_OVER_30_DAYS = "over30day:true"
 
+# Severity sort order — lower index = higher priority (appears first)
+_SEVERITY_ORDER: dict[str, int] = {
+    "CRITICAL": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+    "INFORMATIONAL": 4,
+    "UNTRIAGED": 5,
+}
+
 
 def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool = False) -> list[dict]:
     """Normalise a list of RawFinding objects into Cortex BYOS batch payloads.
@@ -95,6 +105,11 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
     total_clamped_assets = 0
 
     for asset_id, asset_findings in included.items():
+        # Sort: severity ascending (CRITICAL first), then last_seen descending (most recent first)
+        asset_findings = sorted(
+            asset_findings,
+            key=lambda f: (_SEVERITY_ORDER.get(f.severity, 99), -f.last_seen_ms),
+        )
         first = asset_findings[0]
         tags: list[str] = list(first.tags)
         needs_tag = False

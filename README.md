@@ -121,7 +121,7 @@ python3 scripts/integration_test.py --source aws --dry-run --region us-east-1
 You should see a summary like:
 
 ```
-INFO: Inspector2 filters — statuses: ['ACTIVE']  severities: ['MEDIUM', 'HIGH', 'CRITICAL']
+INFO: Inspector2 filters — statuses: ['ACTIVE']  severities: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']
 INFO: Collecting from aws ...
 INFO: Inspector2: 1115 raw findings — 1115 kept ...
 INFO: Normalized 7 asset(s) into 1 batch(es)
@@ -249,7 +249,7 @@ Global resources (destroyed last — shared across all regions):
 - [Development setup](#development-setup)
 - [Running tests](#running-tests)
 - [Integration test](#integration-test)
-- [30-day age filter and timestamp clamping](#30-day-age-filter-and-timestamp-clamping)
+- [30-day age filter, coverage filter, and timestamp clamping](#30-day-age-filter-coverage-filter-and-timestamp-clamping)
 - [Queued batch push](#queued-batch-push)
   - [When to use it](#when-to-use-it)
   - [Typical workflow](#typical-workflow)
@@ -341,7 +341,7 @@ The script will prompt for:
 - AWS region *(default: `us-east-1`)*
 - Secrets Manager secret name *(default: `byob/cortex`)*
 - Inspector2 finding statuses to collect *(default: `ACTIVE`)*
-- Inspector2 severities to collect *(default: `MEDIUM,HIGH,CRITICAL`)*
+- Inspector2 severities to collect *(default: `LOW,MEDIUM,HIGH,CRITICAL`)*
 
 Then it will:
 
@@ -397,7 +397,7 @@ Runs the AWS flow then the Azure flow. Cortex credentials are prompted once and 
 | AWS region(s) | `us-east-1` | Single value or comma-separated list |
 | Secret name | `byob/cortex` | Secrets Manager path for the credentials JSON |
 | Inspector2 statuses | `ACTIVE` | Comma-separated: `ACTIVE`, `SUPPRESSED`, `CLOSED` |
-| Inspector2 severities | `MEDIUM,HIGH,CRITICAL` | Comma-separated: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
+| Inspector2 severities | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
 
 **Steps performed:**
 
@@ -488,7 +488,7 @@ One Terraform workspace per region.
 | `cortex_secret_name` | `byob/cortex` | Secrets Manager secret name |
 | `schedule_expression` | `rate(6 hours)` | EventBridge cron schedule |
 | `inspector2_statuses` | `ACTIVE` | Comma-separated finding statuses to collect |
-| `inspector2_severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect |
+| `inspector2_severities` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect |
 | `inspector2_lookback_hours` | `12` | Only return findings updated in the last N hours. Lambda default is `12` (tight delta). Code default when env var unset is `720` (30 days — matches Cortex API limit). `0` = no time filter |
 
 **Outputs:**
@@ -536,8 +536,10 @@ These are set automatically by Terraform — no manual configuration needed.
 |---|---|---|
 | `CORTEX_SECRET_NAME` | *(from deploy)* | Secrets Manager secret name |
 | `INSPECTOR2_STATUSES` | `ACTIVE` | Comma-separated finding statuses to collect. Valid: `ACTIVE`, `SUPPRESSED`, `CLOSED` |
-| `INSPECTOR2_SEVERITIES` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect. Valid: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
+| `INSPECTOR2_SEVERITIES` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect. Valid: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED` |
 | `INSPECTOR2_LOOKBACK_HOURS` | `12` (Lambda) / `720` (code default) | Only return findings updated in the last N hours. Lambda is set to `12` for a tight 6-hour delta. Code default when unset is `720` (30 days), matching the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to `0` to disable. |
+| `INSPECTOR2_COVERAGE_FILTER` | `true` | Set to `false` to skip the `list-coverage` pre-check (e.g. if the IAM role lacks `inspector2:ListCoverage`). |
+| `INSPECTOR2_COVERAGE_HOURS` | `720` (30 days) | The `lastScannedAt` window for the coverage filter. Only assets scanned within this many hours are included. Set to `72` to restrict to assets scanned in the last 3 days. |
 
 To change the filters after deployment without redeploying, update the Lambda environment variables directly in the AWS console or via the CLI:
 
@@ -696,10 +698,11 @@ python3 scripts/integration_test.py \
 | `--dry-run` | on | Preview payload — no POST to Cortex |
 | `--post` | off | Submit all batches to Cortex XDR |
 | `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2 (AWS only) |
-| `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated Inspector2 severities (AWS only) |
+| `--severities` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated Inspector2 severities (AWS only) |
 | `--statuses` | `ACTIVE` | Comma-separated Inspector2 finding statuses (AWS only) |
 | `--hours` | `720` (30 days) | Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use `12` to match Lambda delta behaviour. `0` = no time filter. (AWS only) |
 | `--clamp-old` | off | Include assets older than 30 days by clamping their `last_seen` to import time instead of dropping them. Adds tag `over30day:true` to any asset or vuln whose timestamp was adjusted. Use with `--hours 0` for a full historical import. |
+| `--coverage-hours` | `720` (30 days) | Only include assets that Inspector2 has scanned in the last N hours (uses `list-coverage`). Example: `--coverage-hours 72` restricts to assets scanned in the last 3 days. Overrides `INSPECTOR2_COVERAGE_HOURS`. AWS only. |
 | `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |
 | `--cortex-api-key` | `CORTEX_API_KEY` env var | Cortex API key |
 | `--cortex-auth-id` | `CORTEX_AUTH_ID` env var | Cortex API key ID |
@@ -710,12 +713,23 @@ Valid `--statuses` values: `ACTIVE`, `SUPPRESSED`, `CLOSED`
 
 ---
 
-## 30-day age filter and timestamp clamping
+## 30-day age filter, coverage filter, and timestamp clamping
 
-Cortex XDR rejects any finding whose `last_seen` is older than 30 days with **HTTP 422**. The normalizer enforces this at the **asset** level, not the individual vulnerability level:
+Before any findings are processed, the collector calls the Inspector2 **`list-coverage`** API to get the set of resources that have actually been scanned recently. Findings for resources not in that set (terminated instances, decommissioned images) are dropped at the source.
+
+After the coverage check, the normalizer applies an **asset-level age filter** based on finding timestamps:
+
+| Stage | What is checked | Controlled by |
+|---|---|---|
+| **Coverage filter** (collector) | Was this resource scanned by Inspector2 within the last N hours? | `--coverage-hours` / `INSPECTOR2_COVERAGE_HOURS` (default 720 h / 30 days) |
+| **Asset age filter** (normalizer) | Is the most-recent vuln's `last_seen` within 30 days? | `--clamp-old` to override |
+| **Vuln age filter** (normalizer) | Individual vuln `last_seen` — never dropped | Timestamps clamped if >30 days |
+
+**Detailed behaviour:**
 
 | Condition | Default behaviour | With `--clamp-old` |
 |---|---|---|
+| Asset not in `list-coverage` window | **Dropped by coverage filter** | Same (coverage filter is independent of `--clamp-old`) |
 | Asset's most-recent vuln is within 30 days | Asset and all its vulns are included | Same |
 | Individual vuln on an active asset is older than 30 days | Vuln is included but its `last_seen` is clamped to import time; tag `over30day:true` added | Same |
 | Asset's most-recent vuln is older than 30 days (entire asset is stale) | **Asset is dropped** | Asset included; all timestamps clamped to import time; tag `over30day:true` added |
@@ -725,6 +739,8 @@ Cortex XDR rejects any finding whose `last_seen` is older than 30 days with **HT
 - All vulnerabilities for a qualifying asset are always included regardless of their individual `last_seen` — old vulns on active assets are clamped, not dropped.
 - The `over30day:true` tag is added to `origin_tags` on any asset where at least one timestamp was adjusted. Use this tag in Cortex XDR to filter or audit clamped findings.
 - `--clamp-old` is the only flag that controls whether **stale assets** (no recent vuln in 30 days) are sent to Cortex. Use it together with `--hours 0` for a full historical import.
+- To reduce the coverage window (e.g. only import assets scanned in the last 72 hours), use `--coverage-hours 72`.
+- Set `INSPECTOR2_COVERAGE_FILTER=false` to disable the coverage pre-check entirely (e.g. if the IAM role lacks `inspector2:ListCoverage`).
 
 ---
 
@@ -903,7 +919,8 @@ After Cortex accepts each batch the file is deleted. If the run is interrupted, 
 | `--batch-dir` | `.byob-batches` | Directory where batch JSON files are stored |
 | `--hours` | `720` (30 days) | Lookback window in hours. `0` = no time filter (full export). AWS only. |
 | `--clamp-old` | off | Include assets older than 30 days by clamping their `last_seen` to import time. Adds tag `over30day:true` to any adjusted entry. Also applies when pushing pre-saved batch files. Use with `--hours 0` for a full historical import. |
-| `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. AWS only. |
+| `--coverage-hours` | `720` (30 days) | Only include assets that Inspector2 has scanned in the last N hours (uses `list-coverage`). Example: `--coverage-hours 72` restricts to assets scanned in the last 3 days. Overrides `INSPECTOR2_COVERAGE_HOURS`. AWS only. |
+| `--severities` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. AWS only. |
 | `--statuses` | `ACTIVE` | Comma-separated finding statuses. AWS only. |
 | `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2. AWS only. |
 | `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |

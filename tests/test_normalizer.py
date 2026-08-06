@@ -147,14 +147,37 @@ def test_normalize_clamp_false_still_drops_old():
     assert batches == []
 
 
-def test_normalize_batches_assets_across_multiple_batches():
-    # 105 assets with the batch cap at 40 → 3 batches (40, 40, 25)
-    findings = [_make_finding(asset_id=f"i-{n}") for n in range(105)]
+def test_normalize_vulns_sorted_by_severity_then_last_seen():
+    """Vulns must be ordered CRITICAL → HIGH → MEDIUM → LOW, most-recent first within each tier."""
+    now = _now_ms()
+    one_day = 24 * 60 * 60 * 1000
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-LOW-OLD",      severity="LOW",      last_seen_ms=now - 5 * one_day),
+        _make_finding(asset_id="i-abc", cve_id="CVE-CRITICAL-OLD",  severity="CRITICAL", last_seen_ms=now - 3 * one_day),
+        _make_finding(asset_id="i-abc", cve_id="CVE-HIGH-RECENT",   severity="HIGH",     last_seen_ms=now - 1 * one_day),
+        _make_finding(asset_id="i-abc", cve_id="CVE-CRITICAL-NEW",  severity="CRITICAL", last_seen_ms=now - 1 * one_day),
+        _make_finding(asset_id="i-abc", cve_id="CVE-MEDIUM",        severity="MEDIUM",   last_seen_ms=now - 2 * one_day),
+    ]
     batches = normalize(findings, "aws_inspector")
-    assert len(batches) == 3
-    assert len(batches[0]["assets"]) == 40
-    assert len(batches[1]["assets"]) == 40
-    assert len(batches[2]["assets"]) == 25
+    vuln_ids = [v["vulnerability_id"] for v in batches[0]["assets"][0]["vulnerabilities"]]
+    assert vuln_ids == [
+        "CVE-CRITICAL-NEW",   # CRITICAL, most recent
+        "CVE-CRITICAL-OLD",   # CRITICAL, older
+        "CVE-HIGH-RECENT",    # HIGH
+        "CVE-MEDIUM",         # MEDIUM
+        "CVE-LOW-OLD",        # LOW
+    ]
+
+
+def test_normalize_batches_assets_across_multiple_batches():
+    # 136 assets with the batch cap at 45 → 4 batches (45, 45, 45, 1)
+    findings = [_make_finding(asset_id=f"i-{n}") for n in range(136)]
+    batches = normalize(findings, "aws_inspector")
+    assert len(batches) == 4
+    assert len(batches[0]["assets"]) == 45
+    assert len(batches[1]["assets"]) == 45
+    assert len(batches[2]["assets"]) == 45
+    assert len(batches[3]["assets"]) == 1
 
 
 def test_normalize_raw_output_truncated_to_2000():
@@ -170,7 +193,7 @@ def test_normalize_description_truncated():
     f.description = "d" * 2000
     batches = normalize([f], "aws_inspector")
     vuln = batches[0]["assets"][0]["vulnerabilities"][0]
-    assert len(vuln["description"]) == 1000
+    assert len(vuln["description"]) == 1500
 
 
 def test_normalize_evidence_truncated():

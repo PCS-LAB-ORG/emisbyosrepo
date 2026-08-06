@@ -383,7 +383,7 @@ def main() -> None:
         help=(
             "Comma-separated Inspector2 severities. "
             "Valid: INFORMATIONAL, LOW, MEDIUM, HIGH, CRITICAL, UNTRIAGED. "
-            "Default: MEDIUM,HIGH,CRITICAL."
+            "Default: MEDIUM,HIGH,CRITICAL,LOW"
         ),
     )
     parser.add_argument(
@@ -417,6 +417,19 @@ def main() -> None:
             "Use together with --hours 0 for a full historical import: "
             "--hours 0 fetches all findings from Inspector2; "
             "--clamp-old ensures none are discarded by the 30-day Cortex API limit."
+        ),
+    )
+    parser.add_argument(
+        "--coverage-hours",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Only include assets that Inspector2 has scanned in the last N hours "
+            "(uses the list-coverage API). "
+            "Default: 720 (30 days). "
+            "Example: --coverage-hours 72 limits to assets scanned in the last 3 days. "
+            "Overrides the INSPECTOR2_COVERAGE_HOURS env var. AWS only."
         ),
     )
     parser.add_argument(
@@ -532,6 +545,9 @@ def main() -> None:
         collect_kwargs: dict = {"mode": "scheduled"}
         if args.source == "aws" and args.region:
             collect_kwargs["region"] = args.region
+        if args.source == "aws" and args.coverage_hours is not None:
+            collect_kwargs["coverage_hours"] = args.coverage_hours
+            logger.info("Coverage filter window: last %d hours.", args.coverage_hours)
 
         findings = collect(**collect_kwargs)
         logger.info("Collected %d findings.", len(findings))

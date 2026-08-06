@@ -4,7 +4,9 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from byob_core.collectors.aws_inspector import collect, _parse_env_list
+from byob_core.collectors.aws_inspector import (
+    collect, _parse_env_list, _active_resource_ids, _coverage_filter_enabled, _coverage_hours,
+)
 from byob_core.models import RawFinding
 
 # ---------------------------------------------------------------------------
@@ -75,12 +77,46 @@ def _make_ecr_finding(severity: str = "HIGH") -> dict:
     }
 
 
-def _mock_paginator(findings: list[dict]) -> MagicMock:
-    mock_pag = MagicMock()
-    mock_pag.paginate.return_value = [{"findings": findings}]
+def _make_coverage_page(resource_ids: list[str]) -> dict:
+    """Return a fake list_coverage page for the given resource IDs."""
+    return {
+        "coveredResources": [
+            {"resourceId": rid, "lastScannedAt": datetime.datetime.now(tz=datetime.timezone.utc)}
+            for rid in resource_ids
+        ]
+    }
+
+
+def _mock_paginator(findings: list[dict], covered_ids: list[str] | None = None):
+    """Build a mock boto3 inspector2 client.
+
+    *covered_ids* controls what list_coverage returns.  When None, defaults to
+    the resource IDs extracted from *findings* so existing tests keep passing.
+    Pass an explicit list (including empty list) to test coverage filtering.
+    """
+    if covered_ids is None:
+        covered_ids = [
+            f["resources"][0]["id"]
+            for f in findings
+            if f.get("resources")
+        ]
+
+    findings_pag = MagicMock()
+    findings_pag.paginate.return_value = [{"findings": findings}]
+
+    coverage_pag = MagicMock()
+    coverage_pag.paginate.return_value = [_make_coverage_page(covered_ids)]
+
+    def _get_paginator(name: str) -> MagicMock:
+        if name == "list_findings":
+            return findings_pag
+        if name == "list_coverage":
+            return coverage_pag
+        return MagicMock()
+
     mock_client = MagicMock()
-    mock_client.get_paginator.return_value = mock_pag
-    return mock_client, mock_pag
+    mock_client.get_paginator.side_effect = _get_paginator
+    return mock_client, findings_pag
 
 
 # ---------------------------------------------------------------------------
@@ -110,9 +146,10 @@ def test_collect_returns_empty_on_no_findings():
 # Scheduled-mode filter criteria
 # ---------------------------------------------------------------------------
 def test_scheduled_filter_uses_status_and_severity_defaults():
-    """Default filters: status=ACTIVE, severity in MEDIUM/HIGH/CRITICAL."""
+    """Default filters: status=ACTIVE, severity in MEDIUM/HIGH/CRITICAL/LOW."""
     mock_client, mock_pag = _mock_paginator([])
-    with patch("boto3.client", return_value=mock_client):
+    clean_env = {"INSPECTOR2_SEVERITIES": "", "INSPECTOR2_STATUSES": ""}
+    with patch("boto3.client", return_value=mock_client), patch.dict(os.environ, clean_env):
         collect(mode="scheduled")
 
     call_kwargs = mock_pag.paginate.call_args[1]
@@ -122,7 +159,7 @@ def test_scheduled_filter_uses_status_and_severity_defaults():
     severity_values = {e["value"] for e in fc["severity"]}
 
     assert status_values == {"ACTIVE"}
-    assert severity_values == {"MEDIUM", "HIGH", "CRITICAL"}
+    assert severity_values == {"MEDIUM", "HIGH", "CRITICAL", "LOW"}
 
 
 def test_scheduled_filter_multi_severity_all_present_in_criteria():
@@ -179,13 +216,13 @@ def test_scheduled_filter_multi_status():
 
 def test_invalid_severity_values_are_ignored_and_default_used():
     mock_client, mock_pag = _mock_paginator([])
-    env = {"INSPECTOR2_SEVERITIES": "BOGUS,INVALID"}
+    env = {"INSPECTOR2_SEVERITIES": "BOGUS,INVALID", "INSPECTOR2_STATUSES": "ACTIVE"}
     with patch("boto3.client", return_value=mock_client), patch.dict(os.environ, env):
         collect(mode="scheduled")
 
     fc = mock_pag.paginate.call_args[1]["filterCriteria"]
-    # Falls back to default: MEDIUM, HIGH, CRITICAL
-    assert {e["value"] for e in fc["severity"]} == {"MEDIUM", "HIGH", "CRITICAL"}
+    # Falls back to default: MEDIUM, HIGH, CRITICAL, LOW
+    assert {e["value"] for e in fc["severity"]} == {"MEDIUM", "HIGH", "CRITICAL", "LOW"}
 
 
 # ---------------------------------------------------------------------------
@@ -284,3 +321,100 @@ def test_parse_env_list_all_invalid_falls_back_to_default():
     with patch.dict(os.environ, {"TEST_VAR": "X,Y,Z"}):
         result = _parse_env_list("TEST_VAR", {"A", "B"}, ["A", "B"])
     assert result == ["A", "B"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage filter
+# ---------------------------------------------------------------------------
+def test_coverage_filter_drops_stale_asset():
+    """Findings for assets NOT in list_coverage are dropped when coverage has other resources."""
+    finding = _make_ec2_finding()
+    # coverage returns a *different* resource — our EC2 is absent (stale/terminated)
+    mock_client, _ = _mock_paginator([finding], covered_ids=["i-OTHER999999"])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert findings == [], "Stale asset should have been filtered out by coverage check"
+
+
+def test_coverage_filter_keeps_active_asset():
+    """Findings for assets IN list_coverage are kept."""
+    finding = _make_ec2_finding()
+    resource_id = finding["resources"][0]["id"]
+    mock_client, _ = _mock_paginator([finding], covered_ids=[resource_id])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert len(findings) == 1
+    assert findings[0].asset_id == resource_id
+
+
+def test_coverage_filter_partial_filter():
+    """Only findings for assets in list_coverage are kept; others are dropped."""
+    ec2 = _make_ec2_finding()
+    ecr = _make_ecr_finding()
+    ec2_id = ec2["resources"][0]["id"]    # i-0abc123def456
+    ecr_id = ecr["resources"][0]["id"]   # sha256:abcd1234
+    # Only EC2 is in coverage (ECR image was pulled long ago)
+    mock_client, _ = _mock_paginator([ec2, ecr], covered_ids=[ec2_id])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert len(findings) == 1
+    assert findings[0].asset_id == ec2_id
+
+
+def test_coverage_filter_disabled_via_env_var():
+    """INSPECTOR2_COVERAGE_FILTER=false must bypass the coverage API call entirely."""
+    finding = _make_ec2_finding()
+    mock_client, _ = _mock_paginator([finding], covered_ids=[])  # coverage would drop it
+    env = {"INSPECTOR2_COVERAGE_FILTER": "false"}
+    with patch("boto3.client", return_value=mock_client), patch.dict(os.environ, env):
+        findings = collect(mode="scheduled")
+    # list_coverage should not have been called
+    paginators_requested = [c.args[0] for c in mock_client.get_paginator.call_args_list]
+    assert "list_coverage" not in paginators_requested
+    assert len(findings) == 1
+
+
+def test_coverage_filter_zero_results_does_not_drop_all_findings():
+    """If list_coverage returns empty unexpectedly, treat as disabled (no filter)."""
+    finding = _make_ec2_finding()
+    # Simulate list_coverage returning no resources (permissions issue / empty account)
+    mock_client, _ = _mock_paginator([finding], covered_ids=[])
+    # Patch _active_resource_ids to return empty set (mimics permission failure path)
+    with patch("boto3.client", return_value=mock_client), \
+         patch("byob_core.collectors.aws_inspector._active_resource_ids", return_value=set()):
+        findings = collect(mode="scheduled")
+    # With empty coverage set, filter is bypassed — finding should be kept
+    assert len(findings) == 1
+
+
+def test_coverage_filter_enabled_flag():
+    assert _coverage_filter_enabled() is True
+    with patch.dict(os.environ, {"INSPECTOR2_COVERAGE_FILTER": "false"}):
+        assert _coverage_filter_enabled() is False
+    with patch.dict(os.environ, {"INSPECTOR2_COVERAGE_FILTER": "true"}):
+        assert _coverage_filter_enabled() is True
+
+
+def test_coverage_hours_default_and_override():
+    """_coverage_hours() reads INSPECTOR2_COVERAGE_HOURS; default 720."""
+    assert _coverage_hours() == 720
+    with patch.dict(os.environ, {"INSPECTOR2_COVERAGE_HOURS": "72"}):
+        assert _coverage_hours() == 72
+    with patch.dict(os.environ, {"INSPECTOR2_COVERAGE_HOURS": "bogus"}):
+        assert _coverage_hours() == 720  # falls back to default
+
+
+def test_coverage_hours_flag_passed_to_active_resource_ids():
+    """--coverage-hours N must be forwarded to _active_resource_ids as lookback_hours=N."""
+    finding = _make_ec2_finding()
+    resource_id = finding["resources"][0]["id"]
+    mock_client, _ = _mock_paginator([finding], covered_ids=[resource_id])
+
+    with patch("boto3.client", return_value=mock_client), \
+         patch("byob_core.collectors.aws_inspector._active_resource_ids",
+               wraps=lambda client, lookback_hours=720: {resource_id}) as mock_cov:
+        collect(mode="scheduled", coverage_hours=72)
+
+    mock_cov.assert_called_once()
+    _, kwargs = mock_cov.call_args
+    assert kwargs.get("lookback_hours") == 72
