@@ -198,8 +198,46 @@ def _ask_pending(n_pending: int, n_total: int, total_assets: int, total_vulns: i
 # Push loop
 # ---------------------------------------------------------------------------
 
-def _push_batches(files: list[pathlib.Path], creds) -> bool:
+_TAG_OVER_30_DAYS = "over30day:true"
+
+
+def _clamp_batch_last_seen(batch: dict, now_ms: int) -> int:
+    """Clamp every last_seen value older than 30 days to now_ms, in-place.
+
+    Modifies both asset-level and vulnerability-level last_seen fields.
+    When any timestamp on an asset is clamped, the tag ``over30day:true`` is
+    appended to the asset's ``origin_tags`` list (if not already present).
+    Returns the count of individual entries (asset + vuln combined) that were
+    clamped.
+    """
+    thirty_days_ms = 30 * 24 * 60 * 60 * 1000
+    cutoff_ms = now_ms - thirty_days_ms
+    clamped = 0
+    for asset in batch.get("assets", []):
+        asset_clamped = False
+        if asset.get("last_seen", now_ms) < cutoff_ms:
+            asset["last_seen"] = now_ms
+            clamped += 1
+            asset_clamped = True
+        for vuln in asset.get("vulnerabilities", []):
+            if vuln.get("last_seen", now_ms) < cutoff_ms:
+                vuln["last_seen"] = now_ms
+                clamped += 1
+                asset_clamped = True
+        if asset_clamped:
+            tags = asset.setdefault("origin_tags", [])
+            if _TAG_OVER_30_DAYS not in tags:
+                tags.append(_TAG_OVER_30_DAYS)
+    return clamped
+
+
+def _push_batches(files: list[pathlib.Path], creds, clamp_old: bool = False) -> bool:
     """Push each batch file to Cortex one at a time; delete on success.
+
+    When clamp_old=True every last_seen value older than 30 days is updated to
+    the current time before submission.  This works on both freshly downloaded
+    batches and on batch files that were saved in a previous run without the
+    --clamp-old flag.
 
     Returns True if all batches were pushed successfully, False if stopped early.
     """
@@ -219,6 +257,15 @@ def _push_batches(files: list[pathlib.Path], creds) -> bool:
             logger.error("Failed to read batch file '%s': %s — skipping.", path.name, exc)
             failed += 1
             continue
+
+        if clamp_old:
+            now_ms = int(__import__("time").time() * 1000)
+            n_clamped = _clamp_batch_last_seen(batch, now_ms)
+            if n_clamped:
+                logger.info(
+                    "  Clamped %d last_seen value(s) older than 30 days to import time.",
+                    n_clamped,
+                )
 
         try:
             results = cortex_client.submit_all([batch], creds)
@@ -355,7 +402,21 @@ def main() -> None:
         metavar="N",
         help=(
             "Only collect findings updated in the last N hours. "
-            "Default: 720 (30 days). Set to 0 for no time filter."
+            "Default: 720 (30 days). "
+            "Set to 0 for no time filter (unlimited — fetches all findings regardless of age). "
+            "Use --hours 0 with --clamp-old for a full historical import."
+        ),
+    )
+    parser.add_argument(
+        "--clamp-old",
+        action="store_true",
+        default=False,
+        help=(
+            "Instead of dropping findings older than 30 days, stamp their last_seen "
+            "with the current import time so Cortex accepts them. "
+            "Use together with --hours 0 for a full historical import: "
+            "--hours 0 fetches all findings from Inspector2; "
+            "--clamp-old ensures none are discarded by the 30-day Cortex API limit."
         ),
     )
     parser.add_argument(
@@ -475,7 +536,12 @@ def main() -> None:
         findings = collect(**collect_kwargs)
         logger.info("Collected %d findings.", len(findings))
 
-        batches = normalizer.normalize(findings, source_key)
+        if args.clamp_old:
+            logger.info(
+                "--clamp-old enabled: findings older than 30 days will have "
+                "last_seen set to import time instead of being dropped."
+            )
+        batches = normalizer.normalize(findings, source_key, clamp_old_findings=args.clamp_old)
         if not batches:
             logger.warning(
                 "No batches produced — all findings were filtered out. "
@@ -523,7 +589,7 @@ def main() -> None:
     files_to_push = _batch_files(batch_dir)
     logger.info("Starting push of %d batch file(s) ...", len(files_to_push))
 
-    success = _push_batches(files_to_push, creds)
+    success = _push_batches(files_to_push, creds, clamp_old=args.clamp_old)
 
     remaining = _batch_files(batch_dir)
     if not remaining:

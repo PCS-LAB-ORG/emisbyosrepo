@@ -69,26 +69,92 @@ def test_normalize_medium_low_maps_to_potential():
         assert vuln["confidence"] == "Potential"
 
 
-def test_normalize_filters_old_findings():
+def test_normalize_filters_old_assets():
+    """An asset whose MOST RECENT vuln is >30 days old is dropped by default."""
     old_ms = int(time.time() * 1000) - (31 * 24 * 60 * 60 * 1000)
     findings = [
-        _make_finding(last_seen_ms=old_ms),
+        _make_finding(asset_id="i-old", last_seen_ms=old_ms),
         _make_finding(asset_id="i-new"),
     ]
     batches = normalize(findings, "aws_inspector")
     asset_ids = [a["origin_asset_id"] for a in batches[0]["assets"]]
     assert "i-new" in asset_ids
-    assert "i-abc" not in asset_ids
+    assert "i-old" not in asset_ids
+
+
+def test_normalize_active_asset_old_vuln_always_included():
+    """An old vuln on an active asset must be included (clamped) not dropped."""
+    now_ms = int(time.time() * 1000)
+    old_ms = now_ms - (31 * 24 * 60 * 60 * 1000)
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001"),           # recent
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0002", last_seen_ms=old_ms),  # old
+    ]
+    # Default (clamp_old_findings=False): old vuln on active asset is still included
+    batches = normalize(findings, "aws_inspector")
+    assert len(batches) == 1
+    asset = batches[0]["assets"][0]
+    cve_ids = [v["vulnerability_id"] for v in asset["vulnerabilities"]]
+    assert "CVE-2024-0001" in cve_ids
+    assert "CVE-2024-0002" in cve_ids
+    # Old vuln last_seen must have been clamped to ≈ now
+    old_vuln = next(v for v in asset["vulnerabilities"] if v["vulnerability_id"] == "CVE-2024-0002")
+    assert old_vuln["last_seen"] >= now_ms
+    # Asset must be tagged
+    assert "over30day:true" in asset["origin_tags"]
+
+
+def test_normalize_active_asset_recent_vuln_no_tag():
+    """Active asset with only recent vulns must NOT get the over30day:true tag."""
+    batches = normalize([_make_finding()], "aws_inspector")
+    asset = batches[0]["assets"][0]
+    assert "over30day:true" not in asset["origin_tags"]
+
+
+def test_normalize_clamp_old_findings_included():
+    """clamp_old_findings=True: old ASSETS are included with last_seen=now and over30day tag."""
+    old_ms = int(time.time() * 1000) - (31 * 24 * 60 * 60 * 1000)
+    finding = _make_finding(asset_id="i-old", last_seen_ms=old_ms)
+    before_ms = int(time.time() * 1000)
+    batches = normalize([finding], "aws_inspector", clamp_old_findings=True)
+    after_ms = int(time.time() * 1000)
+
+    assert len(batches) == 1
+    asset = batches[0]["assets"][0]
+    assert asset["origin_asset_id"] == "i-old"
+    # last_seen on both the asset and the vuln must have been clamped to ≈ now
+    assert before_ms <= asset["last_seen"] <= after_ms
+    assert before_ms <= asset["vulnerabilities"][0]["last_seen"] <= after_ms
+    # Must be tagged
+    assert "over30day:true" in asset["origin_tags"]
+
+
+def test_normalize_clamp_old_does_not_affect_recent_findings():
+    """clamp_old_findings=True must not alter the last_seen of recent findings."""
+    recent_ms = int(time.time() * 1000) - (5 * 24 * 60 * 60 * 1000)  # 5 days ago
+    finding = _make_finding(last_seen_ms=recent_ms)
+    batches = normalize([finding], "aws_inspector", clamp_old_findings=True)
+    asset = batches[0]["assets"][0]
+    assert asset["last_seen"] == recent_ms
+    assert asset["vulnerabilities"][0]["last_seen"] == recent_ms
+
+
+def test_normalize_clamp_false_still_drops_old():
+    """Default behaviour (clamp_old_findings=False) still drops old findings."""
+    old_ms = int(time.time() * 1000) - (31 * 24 * 60 * 60 * 1000)
+    finding = _make_finding(last_seen_ms=old_ms)
+    batches = normalize([finding], "aws_inspector", clamp_old_findings=False)
+    assert batches == []
 
 
 def test_normalize_batches_assets_across_multiple_batches():
-    # 25 assets with the batch cap at 10 → 3 batches (10, 10, 5)
-    findings = [_make_finding(asset_id=f"i-{n}") for n in range(25)]
+    # 105 assets with the batch cap at 40 → 3 batches (40, 40, 25)
+    findings = [_make_finding(asset_id=f"i-{n}") for n in range(105)]
     batches = normalize(findings, "aws_inspector")
     assert len(batches) == 3
-    assert len(batches[0]["assets"]) == 10
-    assert len(batches[1]["assets"]) == 10
-    assert len(batches[2]["assets"]) == 5
+    assert len(batches[0]["assets"]) == 40
+    assert len(batches[1]["assets"]) == 40
+    assert len(batches[2]["assets"]) == 25
 
 
 def test_normalize_raw_output_truncated_to_2000():

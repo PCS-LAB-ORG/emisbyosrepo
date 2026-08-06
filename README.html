@@ -190,6 +190,7 @@ Multiple regions: us-east-1,us-west-2,eu-west-1
 <li><a href="#development-setup">Development setup</a></li>
 <li><a href="#running-tests">Running tests</a></li>
 <li><a href="#integration-test">Integration test</a></li>
+<li><a href="#30-day-age-filter-and-timestamp-clamping">30-day age filter and timestamp clamping</a></li>
 <li><a href="#queued-batch-push">Queued batch push</a></li>
 <li><a href="#when-to-use-it">When to use it</a></li>
 <li><a href="#typical-workflow">Typical workflow</a></li>
@@ -209,7 +210,7 @@ Multiple regions: us-east-1,us-west-2,eu-west-1
     azure_defender.py       Azure Defender (Resource Graph) collector
   cortex_client.py          Cortex BYOS POST + job status check
   models.py                 RawFinding, Credentials, JobResult dataclasses
-  normalizer.py             field mapping, 50-asset batching, 30-day age filter
+  normalizer.py             field mapping, batching, asset-level 30-day age filter, over30day tag
   secrets.py                credential loader (Secrets Manager or Key Vault)
 aws_lambda/
   handler.py                Lambda entry point
@@ -372,28 +373,33 @@ pip install -e ".[dev]"
 <h2 id="running-tests">Running tests</h2>
 <pre><code class="language-bash">pytest tests/ -v
 </code></pre>
-<p>All 25 unit tests run entirely offline — no AWS or Azure credentials required.</p>
+<p>All 52 unit tests run entirely offline — no AWS or Azure credentials required.</p>
 <hr>
 <h2 id="integration-test">Integration test</h2>
 <p>Connects to real scanner APIs but does <strong>not</strong> POST to Cortex by default.</p>
 <pre><code class="language-bash"># Initial full import — default 30-day window (--hours 720), matches Cortex API limit
 python3 scripts/integration_test.py --source aws  --dry-run
 python3 scripts/integration_test.py --source azure --dry-run
-<h1 id="tight-delta---last-12-hours-only--matches-lambda-behaviour">Tight delta — last 12 hours only (matches Lambda behaviour)</h1>
+
+# Tight delta — last 12 hours only (matches Lambda behaviour)
 python3 scripts/integration_test.py --source aws --dry-run \
   --hours 12
-<h1 id="override-severity-filter--one-or-more-comma-separated-values">Override severity filter (one or more comma-separated values)</h1>
+
+# Override severity filter (one or more comma-separated values)
 python3 scripts/integration_test.py --source aws --dry-run \
   --severities HIGH,CRITICAL
-<h1 id="override-both-severity-and-status-filters">Override both severity and status filters</h1>
+
+# Override both severity and status filters
 python3 scripts/integration_test.py --source aws --dry-run \
   --severities CRITICAL \
   --statuses ACTIVE,SUPPRESSED
-<h1 id="specify-aws-region">Specify AWS region</h1>
+
+# Specify AWS region
 python3 scripts/integration_test.py --source aws --dry-run \
   --region us-west-2 \
   --severities HIGH,CRITICAL
-<h1 id="full-import-to-cortex--first-run---30-day-window--no---hours-needed">Full import to Cortex (first run — 30-day window, no --hours needed)</h1>
+
+# Full import to Cortex (first run — 30-day window, no --hours needed)
 python3 scripts/integration_test.py --source aws --post \
   --region us-east-1 \
   --severities HIGH,CRITICAL \
@@ -401,7 +407,8 @@ python3 scripts/integration_test.py --source aws --post \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key &lt;key&gt; \
   --cortex-auth-id &lt;id&gt;
-<h1 id="delta-run-to-cortex--subsequent-runs---last-12-hours">Delta run to Cortex (subsequent runs — last 12 hours)</h1>
+
+# Delta run to Cortex (subsequent runs — last 12 hours)
 python3 scripts/integration_test.py --source aws --post \
   --region us-east-1 \
   --hours 12 \
@@ -410,13 +417,46 @@ python3 scripts/integration_test.py --source aws --post \
   --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
   --cortex-api-key &lt;key&gt; \
   --cortex-auth-id &lt;id&gt;
-<h1 id="azure--no-severity-status-hours-flags---not-applicable">Azure (no severity/status/hours flags — not applicable)</h1>
+
+# Azure (no severity/status/hours flags — not applicable)
 python3 scripts/integration_test.py --source azure --post
 </code></pre>
+<p><strong>Full historical import (all assets, timestamps adjusted):</strong></p>
+<pre><code class="language-bash"># Import every finding regardless of age.
+# --hours 0   : disable the Inspector2 time filter — fetch ALL findings
+# --clamp-old : include assets older than 30 days by stamping last_seen to
+#               import time (Cortex rejects values older than 30 days with
+#               HTTP 422).  Any asset or vuln whose timestamp was adjusted
+#               receives the tag  over30day:true  so you can locate them in
+#               Cortex XDR.
+python3 scripts/integration_test.py \
+  --source aws \
+  --post \
+  --hours 0 \
+  --clamp-old \
+  --region us-east-1 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key &lt;key&gt; \
+  --cortex-auth-id &lt;id&gt;
+</code></pre>
 <p><strong>Flag reference:</strong></p>
-<table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--source</code></td><td><em>(required)</em></td><td><code>aws</code> or <code>azure</code></td></tr><tr><td><code>--dry-run</code></td><td>on</td><td>Preview payload — no POST to Cortex</td></tr><tr><td><code>--post</code></td><td>off</td><td>Submit all batches to Cortex XDR</td></tr><tr><td><code>--region</code></td><td><code>AWS_DEFAULT_REGION</code> or <code>us-east-1</code></td><td>AWS region for Inspector2 (AWS only)</td></tr><tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated Inspector2 severities (AWS only)</td></tr><tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated Inspector2 finding statuses (AWS only)</td></tr><tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use <code>12</code> to match Lambda delta behaviour. <code>0</code> = no time filter. (AWS only)</td></tr><tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr><tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr><tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr></tbody></table>
+<table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--source</code></td><td><em>(required)</em></td><td><code>aws</code> or <code>azure</code></td></tr><tr><td><code>--dry-run</code></td><td>on</td><td>Preview payload — no POST to Cortex</td></tr><tr><td><code>--post</code></td><td>off</td><td>Submit all batches to Cortex XDR</td></tr><tr><td><code>--region</code></td><td><code>AWS_DEFAULT_REGION</code> or <code>us-east-1</code></td><td>AWS region for Inspector2 (AWS only)</td></tr><tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated Inspector2 severities (AWS only)</td></tr><tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated Inspector2 finding statuses (AWS only)</td></tr><tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use <code>12</code> to match Lambda delta behaviour. <code>0</code> = no time filter. (AWS only)</td></tr><tr><td><code>--clamp-old</code></td><td>off</td><td>Include assets older than 30 days by clamping their <code>last_seen</code> to import time instead of dropping them. Adds tag <code>over30day:true</code> to any asset or vuln whose timestamp was adjusted. Use with <code>--hours 0</code> for a full historical import.</td></tr><tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr><tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr><tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr></tbody></table>
 <p>Valid <code>--severities</code> values: <code>INFORMATIONAL</code>, <code>LOW</code>, <code>MEDIUM</code>, <code>HIGH</code>, <code>CRITICAL</code>, <code>UNTRIAGED</code></p>
 <p>Valid <code>--statuses</code> values: <code>ACTIVE</code>, <code>SUPPRESSED</code>, <code>CLOSED</code></p>
+<hr>
+<h2 id="30-day-age-filter-and-timestamp-clamping">30-day age filter and timestamp clamping</h2>
+<p>Cortex XDR rejects any finding whose <code>last_seen</code> is older than 30 days with <strong>HTTP 422</strong>. The normalizer enforces this at the <strong>asset</strong> level, not the individual vulnerability level:</p>
+<table><thead><tr><th>Condition</th><th>Default behaviour</th><th>With <code>--clamp-old</code></th></tr></thead><tbody>
+<tr><td>Asset's most-recent vuln is within 30 days</td><td>Asset and all its vulns are included</td><td>Same</td></tr>
+<tr><td>Individual vuln on an active asset is older than 30 days</td><td>Vuln is included but its <code>last_seen</code> is clamped to import time; tag <code>over30day:true</code> added</td><td>Same</td></tr>
+<tr><td>Asset's most-recent vuln is older than 30 days (entire asset is stale)</td><td><strong>Asset is dropped</strong></td><td>Asset included; all timestamps clamped to import time; tag <code>over30day:true</code> added</td></tr>
+</tbody></table>
+<p><strong>Key points:</strong></p>
+<ul>
+<li>All vulnerabilities for a qualifying asset are always included regardless of their individual <code>last_seen</code> — old vulns on active assets are clamped, not dropped.</li>
+<li>The <code>over30day:true</code> tag is added to <code>origin_tags</code> on any asset where at least one timestamp was adjusted. Use this tag in Cortex XDR to filter or audit clamped findings.</li>
+<li><code>--clamp-old</code> is the only flag that controls whether <strong>stale assets</strong> (no recent vuln in 30 days) are sent to Cortex. Use it together with <code>--hours 0</code> for a full historical import.</li>
+</ul>
 <hr>
 <h2 id="queued-batch-push">Queued batch push</h2>
 <p><code>scripts/batch_push.py</code> solves a problem that <code>integration_test.py --post</code> cannot: <strong>what happens if Cortex errors or rate-limits midway through pushing a large set of findings?</strong> With the integration test you would have to re-query Inspector2 or Azure from the beginning and re-send every batch. The queued batch push avoids that by saving every batch as a local JSON file first, then pushing one file at a time and <strong>deleting it only after Cortex accepts it</strong>. If the run is interrupted for any reason, the remaining files stay on disk and the next run resumes exactly where it stopped.</p>
@@ -500,12 +540,35 @@ python3 scripts/batch_push.py --source aws --yes \
 <p><strong>Specify a custom batch directory:</strong></p>
 <pre><code class="language-bash">python3 scripts/batch_push.py --source aws --batch-dir /tmp/inspector-batches
 </code></pre>
-<p><strong>Full import — disable time filter:</strong></p>
-<pre><code class="language-bash"># --hours 0 exports all findings (not just the 30-day default)
-python3 scripts/batch_push.py --source aws --hours 0
+<p><strong>Full historical import (all assets, timestamps adjusted):</strong></p>
+<pre><code class="language-bash"># Import every finding regardless of age and push to Cortex.
+# --hours 0   : disable Inspector2 time filter — fetch ALL findings
+# --clamp-old : include assets older than 30 days by stamping last_seen to
+#               import time.  Adds tag  over30day:true  to any asset or
+#               vuln whose timestamp was adjusted.
+# Use batch_push.py (not integration_test.py) for this because a full
+# historical export can produce dozens of batches — the resume capability
+# means a rate-limit or network error won't force you to re-download.
+python3 scripts/batch_push.py \
+  --source aws \
+  --hours 0 \
+  --clamp-old \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key &lt;key&gt; \
+  --cortex-auth-id &lt;id&gt;
 </code></pre>
+<p>The script will print each asset/vuln count, let you review the batch files, and then prompt before pushing:</p>
+<pre><code class="language-">INFO: Inspector2 lookback:   disabled (no time filter)
+INFO: Collecting findings from aws ...
+INFO: Collected 14,382 findings.
+INFO: Clamped last_seen to import time for 31 asset(s) with old vuln timestamps; tagged with 'over30day:true'.
+INFO: Normalized 212 asset(s) into 6 batch file(s)
+...
+Push 6 batch(es) to Cortex now? [Y/n]:
+</code></pre>
+<p>After Cortex accepts each batch the file is deleted. If the run is interrupted, re-run the same command — the script detects the remaining files and resumes from where it left off.</p>
 <h3 id="batch-push-flag-reference">Batch push flag reference</h3>
-<table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--source</code></td><td><em>(required unless <code>--push-only</code>)</em></td><td><code>aws</code> or <code>azure</code> — which scanner to collect from</td></tr><tr><td><code>--push-only</code></td><td>off</td><td>Skip download; push existing batch files only. Errors if no files exist.</td></tr><tr><td><code>--download-only</code></td><td>off</td><td>Save batches to disk and exit. Re-run without this flag to push.</td></tr><tr><td><code>--yes</code> / <code>-y</code></td><td>off</td><td>Non-interactive: auto-continue pending batches and auto-push after download</td></tr><tr><td><code>--batch-dir</code></td><td><code>.byob-batches</code></td><td>Directory where batch JSON files are stored</td></tr><tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Lookback window in hours. <code>0</code> = no time filter (full export). AWS only.</td></tr><tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severity levels. AWS only.</td></tr><tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses. AWS only.</td></tr><tr><td><code>--region</code></td><td><code>AWS_DEFAULT_REGION</code> or <code>us-east-1</code></td><td>AWS region for Inspector2. AWS only.</td></tr><tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr><tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr><tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr></tbody></table>
+<table><thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code>--source</code></td><td><em>(required unless <code>--push-only</code>)</em></td><td><code>aws</code> or <code>azure</code> — which scanner to collect from</td></tr><tr><td><code>--push-only</code></td><td>off</td><td>Skip download; push existing batch files only. Errors if no files exist.</td></tr><tr><td><code>--download-only</code></td><td>off</td><td>Save batches to disk and exit. Re-run without this flag to push.</td></tr><tr><td><code>--yes</code> / <code>-y</code></td><td>off</td><td>Non-interactive: auto-continue pending batches and auto-push after download</td></tr><tr><td><code>--batch-dir</code></td><td><code>.byob-batches</code></td><td>Directory where batch JSON files are stored</td></tr><tr><td><code>--hours</code></td><td><code>720</code> (30 days)</td><td>Lookback window in hours. <code>0</code> = no time filter (full export). AWS only.</td></tr><tr><td><code>--clamp-old</code></td><td>off</td><td>Include assets older than 30 days by clamping their <code>last_seen</code> to import time. Adds tag <code>over30day:true</code> to any adjusted entry. Also applies when pushing pre-saved batch files. Use with <code>--hours 0</code> for a full historical import.</td></tr><tr><td><code>--severities</code></td><td><code>MEDIUM,HIGH,CRITICAL</code></td><td>Comma-separated severity levels. AWS only.</td></tr><tr><td><code>--statuses</code></td><td><code>ACTIVE</code></td><td>Comma-separated finding statuses. AWS only.</td></tr><tr><td><code>--region</code></td><td><code>AWS_DEFAULT_REGION</code> or <code>us-east-1</code></td><td>AWS region for Inspector2. AWS only.</td></tr><tr><td><code>--cortex-fqdn</code></td><td><code>CORTEX_FQDN</code> env var</td><td>Cortex API URL</td></tr><tr><td><code>--cortex-api-key</code></td><td><code>CORTEX_API_KEY</code> env var</td><td>Cortex API key</td></tr><tr><td><code>--cortex-auth-id</code></td><td><code>CORTEX_AUTH_ID</code> env var</td><td>Cortex API key ID</td></tr></tbody></table>
 <p>Cortex credentials can also be supplied via <code>CORTEX_SECRET_NAME</code> (AWS Secrets Manager) or <code>CORTEX_SECRET_NAME</code> + <code>CORTEX_KEYVAULT_URL</code> (Azure Key Vault). The script verifies the secret is accessible <strong>before</strong> starting the download.</p>
 <h3 id="error-handling-behaviour">Error handling behaviour</h3>
 <table><thead><tr><th>Error</th><th>What happens</th></tr></thead><tbody><tr><td>Cortex 429 — rate limit exhausted (after 30 s / 60 s / 300 s retries)</td><td>Stops. Remaining batch files stay on disk. Re-run to resume.</td></tr><tr><td>Cortex 422 — validation error on one batch</td><td>Skips that batch and continues pushing the rest.</td></tr><tr><td>Any other network or HTTP error</td><td>Stops. Remaining files stay on disk. Re-run to resume.</td></tr><tr><td>Batch file unreadable / corrupt</td><td>Logs the error, skips that file, continues with the rest.</td></tr><tr><td>All batches pushed successfully</td><td>Batch files and <code>.byob-batches/</code> directory are deleted automatically.</td></tr></tbody></table>

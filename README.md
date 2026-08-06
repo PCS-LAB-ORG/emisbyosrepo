@@ -249,6 +249,7 @@ Global resources (destroyed last — shared across all regions):
 - [Development setup](#development-setup)
 - [Running tests](#running-tests)
 - [Integration test](#integration-test)
+- [30-day age filter and timestamp clamping](#30-day-age-filter-and-timestamp-clamping)
 - [Queued batch push](#queued-batch-push)
   - [When to use it](#when-to-use-it)
   - [Typical workflow](#typical-workflow)
@@ -280,7 +281,7 @@ byob_core/                  shared Python library
     azure_defender.py       Azure Defender (Resource Graph) collector
   cortex_client.py          Cortex BYOS POST + job status check
   models.py                 RawFinding, Credentials, JobResult dataclasses
-  normalizer.py             field mapping, 50-asset batching, 30-day age filter
+  normalizer.py             field mapping, batching, asset-level 30-day age filter, over30day tag
   secrets.py                credential loader (Secrets Manager or Key Vault)
 aws_lambda/
   handler.py                Lambda entry point
@@ -612,7 +613,7 @@ Every asset pushed to Cortex includes cloud metadata tags alongside any user-def
 pytest tests/ -v
 ```
 
-All 25 unit tests run entirely offline — no AWS or Azure credentials required.
+All 52 unit tests run entirely offline — no AWS or Azure credentials required.
 
 ---
 
@@ -666,6 +667,27 @@ python3 scripts/integration_test.py --source aws --post \
 python3 scripts/integration_test.py --source azure --post
 ```
 
+**Full historical import (all assets, timestamps adjusted):**
+
+```bash
+# Import every finding regardless of age.
+# --hours 0   : disable the Inspector2 time filter — fetch ALL findings
+# --clamp-old : include assets older than 30 days by stamping last_seen to
+#               import time (Cortex rejects values older than 30 days with
+#               HTTP 422).  Any asset or vuln whose timestamp was adjusted
+#               receives the tag  over30day:true  so you can locate them in
+#               Cortex XDR.
+python3 scripts/integration_test.py \
+  --source aws \
+  --post \
+  --hours 0 \
+  --clamp-old \
+  --region us-east-1 \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+```
+
 **Flag reference:**
 
 | Flag | Default | Description |
@@ -677,6 +699,7 @@ python3 scripts/integration_test.py --source azure --post
 | `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated Inspector2 severities (AWS only) |
 | `--statuses` | `ACTIVE` | Comma-separated Inspector2 finding statuses (AWS only) |
 | `--hours` | `720` (30 days) | Only collect findings updated in the last N hours. Matches the Cortex API hard limit — findings older than 30 days are rejected anyway. Use `12` to match Lambda delta behaviour. `0` = no time filter. (AWS only) |
+| `--clamp-old` | off | Include assets older than 30 days by clamping their `last_seen` to import time instead of dropping them. Adds tag `over30day:true` to any asset or vuln whose timestamp was adjusted. Use with `--hours 0` for a full historical import. |
 | `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |
 | `--cortex-api-key` | `CORTEX_API_KEY` env var | Cortex API key |
 | `--cortex-auth-id` | `CORTEX_AUTH_ID` env var | Cortex API key ID |
@@ -684,6 +707,24 @@ python3 scripts/integration_test.py --source azure --post
 Valid `--severities` values: `INFORMATIONAL`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, `UNTRIAGED`
 
 Valid `--statuses` values: `ACTIVE`, `SUPPRESSED`, `CLOSED`
+
+---
+
+## 30-day age filter and timestamp clamping
+
+Cortex XDR rejects any finding whose `last_seen` is older than 30 days with **HTTP 422**. The normalizer enforces this at the **asset** level, not the individual vulnerability level:
+
+| Condition | Default behaviour | With `--clamp-old` |
+|---|---|---|
+| Asset's most-recent vuln is within 30 days | Asset and all its vulns are included | Same |
+| Individual vuln on an active asset is older than 30 days | Vuln is included but its `last_seen` is clamped to import time; tag `over30day:true` added | Same |
+| Asset's most-recent vuln is older than 30 days (entire asset is stale) | **Asset is dropped** | Asset included; all timestamps clamped to import time; tag `over30day:true` added |
+
+**Key points:**
+
+- All vulnerabilities for a qualifying asset are always included regardless of their individual `last_seen` — old vulns on active assets are clamped, not dropped.
+- The `over30day:true` tag is added to `origin_tags` on any asset where at least one timestamp was adjusted. Use this tag in Cortex XDR to filter or audit clamped findings.
+- `--clamp-old` is the only flag that controls whether **stale assets** (no recent vuln in 30 days) are sent to Cortex. Use it together with `--hours 0` for a full historical import.
 
 ---
 
@@ -817,12 +858,39 @@ python3 scripts/batch_push.py --source aws --yes \
 python3 scripts/batch_push.py --source aws --batch-dir /tmp/inspector-batches
 ```
 
-**Full import — disable time filter:**
+**Full historical import (all assets, timestamps adjusted):**
 
 ```bash
-# --hours 0 exports all findings (not just the 30-day default)
-python3 scripts/batch_push.py --source aws --hours 0
+# Import every finding regardless of age and push to Cortex.
+# --hours 0   : disable Inspector2 time filter — fetch ALL findings
+# --clamp-old : include assets older than 30 days by stamping last_seen to
+#               import time.  Adds tag  over30day:true  to any asset or
+#               vuln whose timestamp was adjusted.
+# Use batch_push.py (not integration_test.py) for this because a full
+# historical export can produce dozens of batches — the resume capability
+# means a rate-limit or network error won't force you to re-download.
+python3 scripts/batch_push.py \
+  --source aws \
+  --hours 0 \
+  --clamp-old \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
 ```
+
+The script will print each asset/vuln count, let you review the batch files, and then prompt before pushing:
+
+```
+INFO: Inspector2 lookback:   disabled (no time filter)
+INFO: Collecting findings from aws ...
+INFO: Collected 14,382 findings.
+INFO: Clamped last_seen to import time for 31 asset(s) with old vuln timestamps; tagged with 'over30day:true'.
+INFO: Normalized 212 asset(s) into 6 batch file(s)
+...
+Push 6 batch(es) to Cortex now? [Y/n]:
+```
+
+After Cortex accepts each batch the file is deleted. If the run is interrupted, re-run the same command — the script detects the remaining files and resumes from where it left off.
 
 ### Batch push flag reference
 
@@ -834,6 +902,7 @@ python3 scripts/batch_push.py --source aws --hours 0
 | `--yes` / `-y` | off | Non-interactive: auto-continue pending batches and auto-push after download |
 | `--batch-dir` | `.byob-batches` | Directory where batch JSON files are stored |
 | `--hours` | `720` (30 days) | Lookback window in hours. `0` = no time filter (full export). AWS only. |
+| `--clamp-old` | off | Include assets older than 30 days by clamping their `last_seen` to import time. Adds tag `over30day:true` to any adjusted entry. Also applies when pushing pre-saved batch files. Use with `--hours 0` for a full historical import. |
 | `--severities` | `MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. AWS only. |
 | `--statuses` | `ACTIVE` | Comma-separated finding statuses. AWS only. |
 | `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2. AWS only. |
