@@ -70,6 +70,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
                     "Filter override from EventBridge: lookback_hours=%s",
                     overrides["lookback_hours"],
                 )
+            if "inspector2_coverage_hours" in event:
+                overrides["coverage_hours"] = int(event["inspector2_coverage_hours"])
+                logger.info(
+                    "Filter override from EventBridge: coverage_hours=%s",
+                    overrides["coverage_hours"],
+                )
 
         # ── load credentials ──────────────────────────────────────────────────
         logger.info("Loading Cortex credentials ...")

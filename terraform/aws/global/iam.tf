@@ -20,7 +20,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["inspector2:ListFindings"]
+        Action   = ["inspector2:ListFindings", "inspector2:ListCoverage"]
         Resource = "*"
       },
       {

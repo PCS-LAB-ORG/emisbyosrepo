@@ -16,8 +16,12 @@ resource "aws_lambda_function" "byob_scanner" {
 
   environment {
     variables = {
-      CORTEX_SECRET_NAME          = var.cortex_secret_name
-      INSPECTOR2_LOOKBACK_HOURS   = tostring(var.inspector2_lookback_hours)
+      CORTEX_SECRET_NAME               = var.cortex_secret_name
+      INSPECTOR2_LOOKBACK_HOURS        = tostring(var.inspector2_lookback_hours)
+      INSPECTOR2_COVERAGE_HOURS        = tostring(var.inspector2_coverage_hours)
+      INSPECTOR2_COVERAGE_FILTER       = var.inspector2_coverage_filter
+      INSPECTOR2_SEVERITIES            = var.inspector2_severities
+      INSPECTOR2_STATUSES              = var.inspector2_statuses
     }
   }
 }
