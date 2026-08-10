@@ -348,7 +348,10 @@ def _parse(raw: dict) -> RawFinding | None:
     resource_type = resource.get("type", "")
     if resource_type == "AWS_ECR_CONTAINER_IMAGE":
         ecr = resource.get("details", {}).get("awsEcrContainerImage", {})
-        asset_name = ecr.get("repositoryName") or resource_id
+        # Use the image digest as the asset name so each unique image layer is a
+        # distinct asset in Cortex.  The repo name is preserved in the tags below.
+        image_hash = ecr.get("imageHash", "")
+        asset_name = image_hash or resource_id
         # Tags can appear at the resource level and/or inside the detail block — merge both
         user_tags: dict = {
             **resource.get("tags", {}),
@@ -370,8 +373,9 @@ def _parse(raw: dict) -> RawFinding | None:
             f"aws_account:{registry}",
             f"aws_region:{region}",
             f"ecr_repository:{repo}",
+            f"ecr_repo_name:{repo}",
             f"architecture:{ecr.get('architecture', '')}",
-            f"image_hash:{ecr.get('imageHash', '')}",
+            f"image_hash:{image_hash}",
         ]
         if image_tags:
             cloud_meta.append(f"image_tags:{','.join(image_tags)}")

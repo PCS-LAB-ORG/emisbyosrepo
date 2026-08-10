@@ -291,6 +291,42 @@ def test_ecr_finding_parsed_correctly():
     assert "dkr.ecr" in f.fqdn[0]
 
 
+def test_ecr_asset_name_is_image_digest():
+    """asset_name must be the image digest, not the repo name."""
+    mock_client, _ = _mock_paginator([_make_ecr_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    f = findings[0]
+    assert f.asset_name == "sha256:abcd1234", (
+        "ECR asset_name should be the imageHash digest, not the repository name"
+    )
+
+
+def test_ecr_repo_name_in_tags():
+    """Repository name must appear as ecr_repo_name:<name> in origin tags."""
+    mock_client, _ = _mock_paginator([_make_ecr_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    tags = findings[0].tags
+    repo_name_tags = [t for t in tags if t.startswith("ecr_repo_name:")]
+    assert len(repo_name_tags) == 1
+    assert repo_name_tags[0] == "ecr_repo_name:my-app"
+
+
+def test_ec2_asset_name_unchanged():
+    """EC2 asset_name must still come from the Name tag, not a digest."""
+    mock_client, _ = _mock_paginator([_make_ec2_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    f = findings[0]
+    assert f.asset_name == "web-1", (
+        "EC2 asset_name should remain the Name tag value — digest change is ECR-only"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _parse_env_list unit tests
 # ---------------------------------------------------------------------------
