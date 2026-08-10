@@ -433,6 +433,18 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--images-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Restrict the import to ECR container image findings only — EC2 and all other "
+            "resource types are excluded after collection. "
+            "Use this to re-import image assets after the digest-as-name change so Cortex "
+            "receives asset_name=<digest> without re-processing EC2 findings. "
+            "AWS only."
+        ),
+    )
+    parser.add_argument(
         "--cortex-fqdn",
         default=None,
         metavar="FQDN",
@@ -551,6 +563,27 @@ def main() -> None:
 
         findings = collect(**collect_kwargs)
         logger.info("Collected %d findings.", len(findings))
+
+        if args.images_only:
+            if args.source != "aws":
+                logger.warning("--images-only is only supported with --source aws; flag ignored.")
+            else:
+                before = len(findings)
+                findings = [
+                    f for f in findings
+                    if "resource_type:ecr_container_image" in f.tags
+                ]
+                dropped = before - len(findings)
+                logger.info(
+                    "--images-only: kept %d ECR image finding(s), dropped %d non-image finding(s).",
+                    len(findings), dropped,
+                )
+                if not findings:
+                    logger.warning(
+                        "No ECR container image findings found — nothing to import. "
+                        "Check that Inspector2 is scanning ECR repositories."
+                    )
+                    sys.exit(0)
 
         if args.clamp_old:
             logger.info(
