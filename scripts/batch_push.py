@@ -433,16 +433,23 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--resource-type",
+        default=None,
+        choices=["lambda", "ecr", "ec2"],
+        metavar="TYPE",
+        help=(
+            "Restrict the import to a single AWS resource type after collection. "
+            "Valid values: lambda, ecr, ec2. "
+            "Example: --resource-type lambda imports only Lambda function findings; "
+            "--resource-type ecr imports only ECR container image findings. "
+            "AWS only. When omitted all resource types are imported."
+        ),
+    )
+    parser.add_argument(
         "--images-only",
         action="store_true",
         default=False,
-        help=(
-            "Restrict the import to ECR container image findings only — EC2 and all other "
-            "resource types are excluded after collection. "
-            "Use this to re-import image assets after the digest-as-name change so Cortex "
-            "receives asset_name=<digest> without re-processing EC2 findings. "
-            "AWS only."
-        ),
+        help="Alias for --resource-type ecr (kept for backwards compatibility).",
     )
     parser.add_argument(
         "--cortex-fqdn",
@@ -564,24 +571,33 @@ def main() -> None:
         findings = collect(**collect_kwargs)
         logger.info("Collected %d findings.", len(findings))
 
-        if args.images_only:
+        # --resource-type / --images-only filtering
+        _RESOURCE_TYPE_TAG = {
+            "lambda": "resource_type:lambda_function",
+            "ecr":    "resource_type:ecr_container_image",
+            "ec2":    "resource_type:ec2_instance",
+        }
+        resource_type_filter = args.resource_type
+        if args.images_only and not resource_type_filter:
+            resource_type_filter = "ecr"
+
+        if resource_type_filter:
             if args.source != "aws":
-                logger.warning("--images-only is only supported with --source aws; flag ignored.")
+                logger.warning("--resource-type is only supported with --source aws; flag ignored.")
             else:
+                tag = _RESOURCE_TYPE_TAG[resource_type_filter]
                 before = len(findings)
-                findings = [
-                    f for f in findings
-                    if "resource_type:ecr_container_image" in f.tags
-                ]
+                findings = [f for f in findings if tag in f.tags]
                 dropped = before - len(findings)
                 logger.info(
-                    "--images-only: kept %d ECR image finding(s), dropped %d non-image finding(s).",
-                    len(findings), dropped,
+                    "--resource-type %s: kept %d finding(s), dropped %d finding(s).",
+                    resource_type_filter, len(findings), dropped,
                 )
                 if not findings:
                     logger.warning(
-                        "No ECR container image findings found — nothing to import. "
-                        "Check that Inspector2 is scanning ECR repositories."
+                        "No %s findings found — nothing to import. "
+                        "Check that Inspector2 is scanning this resource type.",
+                        resource_type_filter,
                     )
                     sys.exit(0)
 

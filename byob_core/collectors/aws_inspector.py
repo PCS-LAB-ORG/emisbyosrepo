@@ -301,7 +301,11 @@ def _collect_with_retry(
                 continue
             parsed = _parse(raw)
             if parsed:
-                if active_ids is not None and parsed.asset_id not in active_ids:
+                # For Lambda the asset_id is the versioned ARN (e.g. :$LATEST)
+                # but list_coverage returns the base ARN.  Normalise only for
+                # the lookup so each version stays a distinct Cortex asset.
+                coverage_check_id = _lambda_base_arn(parsed.asset_id)
+                if active_ids is not None and coverage_check_id not in active_ids:
                     logger.debug(
                         "Coverage filter: skipped finding for resource '%s' "
                         "(not scanned in last 30 days).",
@@ -334,6 +338,36 @@ def _collect_with_retry(
     # are included rather than being truncated by API page order.
     findings.sort(key=lambda f: _SEVERITY_RANK.get(f.severity.upper(), len(_SEVERITY_ORDER)))
     return findings
+
+
+def _parse_lambda_arn(arn: str) -> tuple[str, str]:
+    """Return (function_name, version_qualifier) from a Lambda ARN.
+
+    Handles:
+      arn:aws:lambda:REGION:ACCOUNT:function:NAME          → ("NAME", "$LATEST")
+      arn:aws:lambda:REGION:ACCOUNT:function:NAME:$LATEST  → ("NAME", "$LATEST")
+      arn:aws:lambda:REGION:ACCOUNT:function:NAME:3        → ("NAME", "3")
+      arn:aws:lambda:REGION:ACCOUNT:function:NAME:prod     → ("NAME", "prod")
+    """
+    parts = arn.split(":")
+    if len(parts) >= 8 and parts[5] == "function":
+        return parts[6], parts[7]
+    if len(parts) >= 7 and parts[5] == "function":
+        return parts[6], "$LATEST"
+    return parts[-1] if parts else arn, "$LATEST"
+
+
+def _lambda_base_arn(arn: str) -> str:
+    """Strip any version/alias qualifier from a Lambda ARN.
+
+    Inspector2 list_findings may return  arn:...:function:my-fn:$LATEST
+    while list_coverage returns          arn:...:function:my-fn
+    Normalising to the base ARN ensures the coverage filter matches correctly.
+    """
+    parts = arn.split(":")
+    if len(parts) >= 8 and parts[5] == "function":
+        return ":".join(parts[:7])
+    return arn
 
 
 def _parse(raw: dict) -> RawFinding | None:
@@ -379,6 +413,40 @@ def _parse(raw: dict) -> RawFinding | None:
         ]
         if image_tags:
             cloud_meta.append(f"image_tags:{','.join(image_tags)}")
+    elif resource_type == "AWS_LAMBDA_FUNCTION":
+        lam = resource.get("details", {}).get("awsLambdaFunction", {})
+        user_tags = {
+            **resource.get("tags", {}),
+            **lam.get("functionTags", {}),
+        }
+        # Extract function name and version qualifier from the ARN.
+        # Inspector2 list_findings may return the ARN with a version qualifier
+        # (e.g. :$LATEST or :3) while list_coverage returns the base ARN.
+        # We normalise asset_id to the base ARN so the coverage filter matches,
+        # and store the qualifier separately in tags.
+        fn_name, fn_version = _parse_lambda_arn(resource_id)
+        asset_name = lam.get("functionName") or fn_name or resource_id
+        runtime = lam.get("runtime", "")
+        layers  = lam.get("layers", [])
+        os_name = None
+        ipv4    = []
+        ipv6    = []
+        fqdn    = []
+        cloud_meta = [
+            "cloud:aws",
+            "resource_type:lambda_function",
+            f"aws_account:{aws_account}",
+            f"aws_region:{region}",
+            f"function_name:{asset_name}",
+            f"runtime:{runtime}",
+            f"lambda_version:{fn_version}",
+        ]
+        if layers:
+            cloud_meta.append(f"lambda_layers:{','.join(layers)}")
+        # Keep the full versioned ARN as asset_id (origin_asset_id in Cortex) so
+        # each Lambda version is a distinct asset.  The base-ARN normalisation
+        # needed for the coverage filter is handled at the lookup site in
+        # _collect_with_retry, not here.
     else:
         ec2 = resource.get("details", {}).get("awsEc2Instance", {})
         # Tags can appear at the resource level and/or inside the EC2 detail block — merge both

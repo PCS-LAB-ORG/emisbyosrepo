@@ -6,6 +6,7 @@ import pytest
 
 from byob_core.collectors.aws_inspector import (
     collect, _parse_env_list, _active_resource_ids, _coverage_filter_enabled, _coverage_hours,
+    _parse_lambda_arn, _lambda_base_arn,
 )
 from byob_core.models import RawFinding
 
@@ -92,14 +93,21 @@ def _mock_paginator(findings: list[dict], covered_ids: list[str] | None = None):
 
     *covered_ids* controls what list_coverage returns.  When None, defaults to
     the resource IDs extracted from *findings* so existing tests keep passing.
+    For Lambda findings the versioned ARN is automatically normalised to the
+    base ARN (no qualifier) to match what list_coverage returns in production.
     Pass an explicit list (including empty list) to test coverage filtering.
     """
     if covered_ids is None:
-        covered_ids = [
-            f["resources"][0]["id"]
-            for f in findings
-            if f.get("resources")
-        ]
+        covered_ids = []
+        for f in findings:
+            if not f.get("resources"):
+                continue
+            rid = f["resources"][0]["id"]
+            # Normalise Lambda ARNs to base form (strip :$LATEST / :N / :alias)
+            parts = rid.split(":")
+            if len(parts) == 8 and parts[5] == "function":
+                rid = ":".join(parts[:7])
+            covered_ids.append(rid)
 
     findings_pag = MagicMock()
     findings_pag.paginate.return_value = [{"findings": findings}]
@@ -454,3 +462,149 @@ def test_coverage_hours_flag_passed_to_active_resource_ids():
     mock_cov.assert_called_once()
     _, kwargs = mock_cov.call_args
     assert kwargs.get("lookback_hours") == 72
+
+
+# ---------------------------------------------------------------------------
+# Lambda ARN helpers
+# ---------------------------------------------------------------------------
+def test_parse_lambda_arn_no_qualifier():
+    fn, ver = _parse_lambda_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn")
+    assert fn == "my-fn"
+    assert ver == "$LATEST"
+
+
+def test_parse_lambda_arn_latest():
+    fn, ver = _parse_lambda_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST")
+    assert fn == "my-fn"
+    assert ver == "$LATEST"
+
+
+def test_parse_lambda_arn_version_number():
+    fn, ver = _parse_lambda_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn:3")
+    assert fn == "my-fn"
+    assert ver == "3"
+
+
+def test_parse_lambda_arn_alias():
+    fn, ver = _parse_lambda_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn:prod")
+    assert fn == "my-fn"
+    assert ver == "prod"
+
+
+def test_lambda_base_arn_strips_qualifier():
+    base = _lambda_base_arn("arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST")
+    assert base == "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+
+
+def test_lambda_base_arn_no_qualifier_unchanged():
+    arn = "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+    assert _lambda_base_arn(arn) == arn
+
+
+# ---------------------------------------------------------------------------
+# Lambda finding fixture + parsing tests
+# ---------------------------------------------------------------------------
+def _make_lambda_finding(
+    severity: str = "HIGH",
+    arn: str = "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST",
+) -> dict:
+    return {
+        "findingArn": "arn:aws:inspector2:us-east-1:123456789012:finding/lambda-xyz",
+        "severity": severity,
+        "updatedAt": datetime.datetime(2024, 6, 1, tzinfo=datetime.timezone.utc),
+        "description": "Lambda vuln",
+        "resources": [{
+            "id": arn,
+            "type": "AWS_LAMBDA_FUNCTION",
+            "region": "us-east-1",
+            "providerAccountId": "123456789012",
+            "tags": {"env": "prod"},
+            "details": {
+                "awsLambdaFunction": {
+                    "functionName": "my-fn",
+                    "runtime": "python3.12",
+                    "layers": ["arn:aws:lambda:us-east-1:123456789012:layer:my-layer:1"],
+                    "functionTags": {"team": "platform"},
+                }
+            },
+        }],
+        "packageVulnerabilityDetails": {
+            "vulnerabilityId": "CVE-2024-55555",
+            "cvss": [{"baseScore": 7.8}],
+        },
+        "inspectorScore": 7.8,
+        "remediation": {"recommendation": {"text": "Update runtime"}},
+    }
+
+
+def test_lambda_finding_parsed_correctly():
+    mock_client, _ = _mock_paginator([_make_lambda_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.cve_id == "CVE-2024-55555"
+    assert f.asset_name == "my-fn"
+
+
+def test_lambda_asset_id_is_versioned_arn():
+    """origin_asset_id must keep the version qualifier so each Lambda version is a distinct Cortex asset."""
+    arn_with_version = "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST"
+    mock_client, _ = _mock_paginator([_make_lambda_finding(arn=arn_with_version)])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    assert findings[0].asset_id == arn_with_version, (
+        "Lambda asset_id must be the full versioned ARN so my-fn:$LATEST and "
+        "my-fn:3 are distinct assets in Cortex"
+    )
+
+
+def test_lambda_has_correct_resource_type_tag():
+    """Lambda findings must carry resource_type:lambda_function, not resource_type:ec2_instance."""
+    mock_client, _ = _mock_paginator([_make_lambda_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    tags = findings[0].tags
+    assert "resource_type:lambda_function" in tags
+    assert not any(t == "resource_type:ec2_instance" for t in tags), (
+        "Lambda findings must not be tagged as ec2_instance"
+    )
+
+
+def test_lambda_version_in_tags():
+    """Version qualifier extracted from ARN must appear as lambda_version: tag."""
+    mock_client, _ = _mock_paginator([_make_lambda_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    tags = findings[0].tags
+    version_tags = [t for t in tags if t.startswith("lambda_version:")]
+    assert len(version_tags) == 1
+    assert version_tags[0] == "lambda_version:$LATEST"
+
+
+def test_lambda_runtime_in_tags():
+    mock_client, _ = _mock_paginator([_make_lambda_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    tags = findings[0].tags
+    assert any(t.startswith("runtime:") for t in tags)
+
+
+def test_lambda_coverage_filter_uses_base_arn():
+    """Coverage filter must match Lambda findings even when list_findings returns versioned ARN."""
+    arn_with_version = "arn:aws:lambda:us-east-1:123456789012:function:my-fn:$LATEST"
+    base_arn         = "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+    finding = _make_lambda_finding(arn=arn_with_version)
+    # list_coverage returns the base ARN (no version qualifier)
+    mock_client, _ = _mock_paginator([finding], covered_ids=[base_arn])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert len(findings) == 1, (
+        "Lambda finding with versioned ARN should be kept when the base ARN is in coverage"
+    )
+
