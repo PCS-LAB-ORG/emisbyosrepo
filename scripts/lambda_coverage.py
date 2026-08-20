@@ -195,21 +195,25 @@ def _print_summary(rows: list[dict], region: str) -> None:
     for r in rows:
         counts[(r["scan_type"], r["status_code"])] += 1
 
+    # Distinct accounts
+    accounts = sorted({r["account_id"] for r in rows})
+
     # Collect unique scan types and statuses (sorted)
-    scan_types  = sorted({k[0] for k in counts})
+    scan_types   = sorted({k[0] for k in counts})
     status_codes = sorted({k[1] for k in counts})
 
     W_TYPE   = max(10, max(len(s) for s in scan_types))
     W_STATUS = max(12, max(len(s) for s in status_codes))
     W_COUNT  = 7
 
-    # Header row
     header = f"  {'SCAN TYPE':<{W_TYPE}}  {'STATUS':<{W_STATUS}}  {'COUNT':>{W_COUNT}}"
     div    = _divider(len(header) + 2)
 
     print(f"\n{_divider(len(header) + 2, bold=True)}")
     print(f"{BOLD}  LAMBDA INSPECTOR2 COVERAGE SUMMARY  —  region: {region}{RESET}")
     print(f"{BOLD}  Total Lambda scan records : {len(rows)}{RESET}")
+    if len(accounts) > 1:
+        print(f"{BOLD}  AWS accounts              : {', '.join(accounts)}{RESET}")
     print(_divider(len(header) + 2, bold=True))
     print(f"{BOLD}{header}{RESET}")
     print(div)
@@ -237,9 +241,10 @@ def _print_detail(rows: list[dict], sort_by: str) -> None:
 
     # Sort
     sort_key = {
-        "function": lambda r: r["function_name"].lower(),
-        "status":   lambda r: (r["status_code"], r["function_name"].lower()),
-        "scan_type":lambda r: (r["scan_type"], r["function_name"].lower()),
+        "function":  lambda r: (r["function_name"].lower(), r["account_id"]),
+        "account":   lambda r: (r["account_id"], r["function_name"].lower()),
+        "status":    lambda r: (r["status_code"], r["function_name"].lower()),
+        "scan_type": lambda r: (r["scan_type"], r["function_name"].lower()),
         "last_scan": lambda r: (
             r["last_scanned"] or datetime.min.replace(tzinfo=timezone.utc),
         ),
@@ -247,6 +252,7 @@ def _print_detail(rows: list[dict], sort_by: str) -> None:
     rows = sorted(rows, key=sort_key)
 
     # Column widths
+    W_ACCT    = max(7,  max(len(r["account_id"][-6:]) for r in rows))  # last 6 digits
     W_FN      = max(16, max(len(r["function_name"]) for r in rows))
     W_VER     = max(7,  max(len(r["version"])       for r in rows))
     W_RT      = max(10, max(len(r["runtime"])       for r in rows))
@@ -257,7 +263,7 @@ def _print_detail(rows: list[dict], sort_by: str) -> None:
     W_AGE     = 10
 
     header = (
-        f"  {'FUNCTION':<{W_FN}}  {'VERSION':<{W_VER}}  {'RUNTIME':<{W_RT}}  "
+        f"  {'ACCOUNT':<{W_ACCT}}  {'FUNCTION':<{W_FN}}  {'VERSION':<{W_VER}}  {'RUNTIME':<{W_RT}}  "
         f"{'SCAN TYPE':<{W_TYPE}}  {'STATUS':<{W_STATUS}}  "
         f"{'REASON':<{W_REASON}}  {'LAST SCAN':<{W_LAST}}  {'AGE':<{W_AGE}}"
     )
@@ -269,8 +275,9 @@ def _print_detail(rows: list[dict], sort_by: str) -> None:
     print(f"{BOLD}{header}{RESET}")
     print(div)
 
-    prev_fn = None
+    prev_key = None
     for r in rows:
+        acct    = r["account_id"][-6:] if len(r["account_id"]) >= 6 else r["account_id"]
         fn      = r["function_name"]
         ver     = r["version"]
         rt      = r["runtime"]
@@ -280,12 +287,13 @@ def _print_detail(rows: list[dict], sort_by: str) -> None:
         last    = _fmt_ts(r["last_scanned"])
         age     = _age(r["last_scanned"])
 
-        # Dim repeated function names for readability
-        fn_str = fn if fn != prev_fn else _c(DIM, fn)
-        prev_fn = fn
+        # Dim repeated (account, function) pairs for readability
+        cur_key = (acct, fn)
+        fn_str  = fn if cur_key != prev_key else _c(DIM, fn)
+        prev_key = cur_key
 
         print(
-            f"  {fn_str:<{W_FN}}  {ver:<{W_VER}}  {rt:<{W_RT}}  "
+            f"  {acct:<{W_ACCT}}  {fn_str:<{W_FN}}  {ver:<{W_VER}}  {rt:<{W_RT}}  "
             f"{_scan_type_c(stype):<{W_TYPE + 10}}  "
             f"{_status_c(scode):<{W_STATUS + 10}}  "
             f"{sreason:<{W_REASON}}  "
@@ -328,7 +336,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--sort", default="function",
-        choices=["function", "status", "scan_type", "last_scan"],
+        choices=["function", "account", "status", "scan_type", "last_scan"],
         help="Sort the detail table by column (default: function).",
     )
     args = parser.parse_args()
