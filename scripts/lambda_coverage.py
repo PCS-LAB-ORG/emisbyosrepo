@@ -110,6 +110,7 @@ def _fetch_lambda_coverage(
     region: str,
     scan_type_filter: str | None,
     status_filter: str | None,
+    coverage_hours: int | None,
 ) -> list[dict]:
     """Return raw coveredResource records for Lambda functions."""
     client = boto3.client("inspector2", region_name=region)
@@ -121,6 +122,13 @@ def _fetch_lambda_coverage(
         criteria["scanType"] = [{"comparison": "EQUALS", "value": scan_type_filter.upper()}]
     if status_filter:
         criteria["scanStatusCode"] = [{"comparison": "EQUALS", "value": status_filter.upper()}]
+    if coverage_hours is not None:
+        from datetime import datetime, timezone                        # noqa: PLC0415
+        now    = datetime.now(tz=timezone.utc)
+        cutoff = datetime.fromtimestamp(
+            now.timestamp() - coverage_hours * 3600, tz=timezone.utc
+        )
+        criteria["lastScannedAt"] = [{"startInclusive": cutoff, "endInclusive": now}]
 
     resources: list[dict] = []
     try:
@@ -301,6 +309,15 @@ def main() -> None:
         help="AWS region (default: AWS_DEFAULT_REGION env var, then us-east-1).",
     )
     parser.add_argument(
+        "--coverage-hours", type=int, default=None, metavar="N",
+        help=(
+            "Only show Lambda functions scanned by Inspector2 in the last N hours "
+            "(filters by lastScannedAt). "
+            "Default: no time filter — all known Lambda functions are shown. "
+            "Example: --coverage-hours 720 limits to functions scanned in the last 30 days."
+        ),
+    )
+    parser.add_argument(
         "--scan-type", default=None, metavar="TYPE",
         choices=["PACKAGE", "NETWORK", "CODE"],
         help="Filter to a specific scan type: PACKAGE, NETWORK, or CODE.",
@@ -318,8 +335,9 @@ def main() -> None:
 
     region = args.region or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
-    print(f"\n{CYAN}Fetching Lambda coverage from Inspector2 (region={region}) ...{RESET}")
-    raw = _fetch_lambda_coverage(region, args.scan_type, args.status)
+    hours_note = f", lastScannedAt within {args.coverage_hours}h" if args.coverage_hours else ""
+    print(f"\n{CYAN}Fetching Lambda coverage from Inspector2 (region={region}{hours_note}) ...{RESET}")
+    raw = _fetch_lambda_coverage(region, args.scan_type, args.status, args.coverage_hours)
 
     if not raw:
         print(f"\n{YELLOW}No Lambda coverage records found.")
