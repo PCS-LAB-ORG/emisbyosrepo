@@ -61,6 +61,112 @@ logger = logging.getLogger(__name__)
 DEFAULT_BATCH_DIR = ".byob-batches"
 BATCH_FILE_GLOB = "batch_*.json"
 MANIFEST_FILE = ".manifest.json"
+DEFAULT_CACHE_FILE = ".byob-findings-cache.json"
+
+
+# ---------------------------------------------------------------------------
+# Findings cache — serialize / deserialize RawFinding objects
+# ---------------------------------------------------------------------------
+
+def _save_findings_cache(
+    findings: list,
+    cache_path: pathlib.Path,
+    source: str,
+    region: str | None,
+    lookback_hours: int,
+    coverage_hours: int | None,
+) -> None:
+    """Serialise findings to a JSON cache file with metadata."""
+    data = {
+        "cached_at":      datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source":         source,
+        "region":         region or os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        "lookback_hours": lookback_hours,
+        "coverage_hours": coverage_hours,
+        "findings_count": len(findings),
+        "findings": [
+            {
+                "asset_id":    f.asset_id,
+                "asset_name":  f.asset_name,
+                "ipv4":        f.ipv4,
+                "ipv6":        f.ipv6,
+                "fqdn":        f.fqdn,
+                "mac_address": f.mac_address,
+                "os_name":     f.os_name,
+                "tags":        f.tags,
+                "last_seen_ms":f.last_seen_ms,
+                "cve_id":      f.cve_id,
+                "severity":    f.severity,
+                "description": f.description,
+                "evidence":    f.evidence,
+                "raw_output":  f.raw_output,
+                "source":      f.source,
+            }
+            for f in findings
+        ],
+    }
+    cache_path.write_text(json.dumps(data, indent=2))
+    logger.info(
+        "Cached %d finding(s) to '%s' (cached_at=%s).",
+        len(findings), cache_path, data["cached_at"],
+    )
+
+
+def _load_findings_cache(cache_path: pathlib.Path) -> tuple[list, dict]:
+    """Load findings from a cache file. Returns (findings, metadata)."""
+    from byob_core.models import RawFinding                            # noqa: PLC0415
+    if not cache_path.exists():
+        logger.error(
+            "Cache file '%s' not found. "
+            "Run first with --cache-findings to create it.",
+            cache_path,
+        )
+        sys.exit(1)
+
+    try:
+        data = json.loads(cache_path.read_text())
+    except Exception as exc:
+        logger.error("Failed to read cache file '%s': %s", cache_path, exc)
+        sys.exit(1)
+
+    meta = {
+        "cached_at":      data.get("cached_at", "unknown"),
+        "source":         data.get("source", "unknown"),
+        "region":         data.get("region", "unknown"),
+        "lookback_hours": data.get("lookback_hours"),
+        "coverage_hours": data.get("coverage_hours"),
+        "findings_count": data.get("findings_count", 0),
+    }
+
+    findings = []
+    for d in data.get("findings", []):
+        try:
+            findings.append(RawFinding(
+                asset_id=   d["asset_id"],
+                asset_name= d["asset_name"],
+                ipv4=       d.get("ipv4", []),
+                ipv6=       d.get("ipv6", []),
+                fqdn=       d.get("fqdn", []),
+                mac_address=d.get("mac_address"),
+                os_name=    d.get("os_name"),
+                tags=       d.get("tags", []),
+                last_seen_ms=d["last_seen_ms"],
+                cve_id=     d["cve_id"],
+                severity=   d.get("severity", "MEDIUM"),
+                description=d.get("description", ""),
+                evidence=   d.get("evidence", ""),
+                raw_output= d.get("raw_output", ""),
+                source=     d.get("source", "aws_inspector"),
+            ))
+        except KeyError as exc:
+            logger.warning("Skipping malformed cache entry (missing field %s).", exc)
+
+    logger.info(
+        "Loaded %d finding(s) from cache '%s' (cached_at=%s, source=%s, region=%s).",
+        len(findings), cache_path,
+        meta["cached_at"], meta["source"], meta["region"],
+    )
+    return findings, meta
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +445,11 @@ def main() -> None:
     mode.add_argument(
         "--download-only",
         action="store_true",
-        help="Download and save batches to disk but do not push to Cortex.",
+        help=(
+            "Download and save batches to disk but do not push to Cortex. "
+            "Note: not needed with --cache-findings — that flag already exits "
+            "after saving the cache without creating batch files."
+        ),
     )
     mode.add_argument(
         "--push-only",
@@ -452,6 +562,34 @@ def main() -> None:
         help="Alias for --resource-type ecr (kept for backwards compatibility).",
     )
     parser.add_argument(
+        "--cache-findings",
+        action="store_true",
+        default=False,
+        help=(
+            "After collecting from Inspector2, save all findings to a local cache file. "
+            "Use with --from-cache on subsequent runs to skip the Inspector2 API calls entirely. "
+            "Combine with --resource-type to import subsets from the same cached dataset. "
+            "AWS only."
+        ),
+    )
+    parser.add_argument(
+        "--from-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Load findings from the local cache file instead of calling Inspector2. "
+            "Requires a prior run with --cache-findings. "
+            "All --resource-type, --clamp-old, and --hours filters still apply. "
+            "AWS only."
+        ),
+    )
+    parser.add_argument(
+        "--cache-file",
+        default=DEFAULT_CACHE_FILE,
+        metavar="PATH",
+        help=f"Path to the findings cache file (default: {DEFAULT_CACHE_FILE}).",
+    )
+    parser.add_argument(
         "--cortex-fqdn",
         default=None,
         metavar="FQDN",
@@ -560,16 +698,111 @@ def main() -> None:
 
         from byob_core import normalizer                              # noqa: PLC0415
 
-        logger.info("Collecting findings from %s ...", args.source)
-        collect_kwargs: dict = {"mode": "scheduled"}
-        if args.source == "aws" and args.region:
-            collect_kwargs["region"] = args.region
-        if args.source == "aws" and args.coverage_hours is not None:
-            collect_kwargs["coverage_hours"] = args.coverage_hours
-            logger.info("Coverage filter window: last %d hours.", args.coverage_hours)
+        cache_path = pathlib.Path(args.cache_file)
 
-        findings = collect(**collect_kwargs)
-        logger.info("Collected %d findings.", len(findings))
+        # ── Overwrite confirmation — before any API calls ──────────────────
+        if args.cache_findings and not args.from_cache and args.source == "aws":
+            if cache_path.exists():
+                try:
+                    existing_meta = json.loads(cache_path.read_text())
+                    logger.warning(
+                        "Cache file '%s' already exists "
+                        "(cached_at=%s  findings=%s  region=%s).",
+                        cache_path,
+                        existing_meta.get("cached_at", "unknown"),
+                        existing_meta.get("findings_count", "unknown"),
+                        existing_meta.get("region", "unknown"),
+                    )
+                except Exception:
+                    logger.warning("Cache file '%s' already exists.", cache_path)
+
+                if not args.yes:
+                    try:
+                        answer = input("Overwrite existing cache? [y/N]: ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        logger.info("Aborted — existing cache kept.")
+                        sys.exit(0)
+                    if not answer.startswith("y"):
+                        logger.info("Aborted — existing cache kept.")
+                        sys.exit(0)
+                else:
+                    logger.info("--yes flag set: overwriting existing cache.")
+
+        if args.from_cache:
+            # ── Load from cache ────────────────────────────────────────────
+            if args.source != "aws":
+                logger.error("--from-cache is only supported with --source aws.")
+                sys.exit(1)
+            findings, cache_meta = _load_findings_cache(cache_path)
+            logger.info(
+                "Cache info: source=%s  region=%s  cached_at=%s  "
+                "lookback_hours=%s  coverage_hours=%s",
+                cache_meta["source"], cache_meta["region"], cache_meta["cached_at"],
+                cache_meta["lookback_hours"], cache_meta["coverage_hours"],
+            )
+        else:
+            # ── Live collection from Inspector2 / Azure ────────────────────
+            logger.info("Collecting findings from %s ...", args.source)
+            collect_kwargs: dict = {"mode": "scheduled"}
+            if args.source == "aws" and args.region:
+                collect_kwargs["region"] = args.region
+            if args.source == "aws" and args.coverage_hours is not None:
+                collect_kwargs["coverage_hours"] = args.coverage_hours
+                logger.info("Coverage filter window: last %d hours.", args.coverage_hours)
+
+            findings = collect(**collect_kwargs)
+            logger.info("Collected %d findings.", len(findings))
+
+            if args.cache_findings:
+                if args.source != "aws":
+                    logger.warning("--cache-findings is only supported with --source aws; skipped.")
+                else:
+                    _save_findings_cache(
+                        findings, cache_path,
+                        source=source_key,
+                        region=args.region,
+                        lookback_hours=args.hours,
+                        coverage_hours=args.coverage_hours,
+                    )
+                    # ── Post-save summary table ────────────────────────────
+                    from collections import defaultdict                # noqa: PLC0415
+                    assets_by_type:   dict[str, set] = defaultdict(set)
+                    findings_by_type: dict[str, int] = defaultdict(int)
+                    for f in findings:
+                        rtype = next(
+                            (t[len("resource_type:"):] for t in f.tags
+                             if t.startswith("resource_type:")), "unknown"
+                        )
+                        assets_by_type[rtype].add(f.asset_id)
+                        findings_by_type[rtype] += 1
+                    W = max(24, max((len(t) for t in assets_by_type), default=0))
+                    div = "─" * (W + 30)
+                    logger.info(div)
+                    logger.info(
+                        "  %-*s  %8s  %10s  %s",
+                        W, "RESOURCE TYPE", "ASSETS", "FINDINGS", "IMPORT FLAG",
+                    )
+                    logger.info(div)
+                    _FLAG = {
+                        "lambda_function":     "--resource-type lambda",
+                        "ec2_instance":        "--resource-type ec2",
+                        "ecr_container_image": "--resource-type ecr",
+                    }
+                    for rtype in sorted(assets_by_type):
+                        logger.info(
+                            "  %-*s  %8d  %10d  %s",
+                            W, rtype,
+                            len(assets_by_type[rtype]),
+                            findings_by_type[rtype],
+                            _FLAG.get(rtype, ""),
+                        )
+                    logger.info(div)
+                    logger.info(
+                        "Re-run with --from-cache --resource-type <type> "
+                        "to import without re-fetching Inspector2."
+                    )
+                    sys.exit(0)
 
         # --resource-type / --images-only filtering
         _RESOURCE_TYPE_TAG = {

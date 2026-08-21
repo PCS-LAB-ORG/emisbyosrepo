@@ -16,7 +16,7 @@ docs/
 # Coverage
 .coverage
 htmlcov/
-
+.byob-findings-cache.json
 # Terraform (provider binaries and state)
 .terraform/
 .terraform.lock.hcl

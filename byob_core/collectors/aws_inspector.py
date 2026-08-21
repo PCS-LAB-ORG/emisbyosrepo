@@ -158,7 +158,10 @@ def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
             for resource in page.get("coveredResources", []):
                 rid = resource.get("resourceId", "")
                 if rid:
-                    resource_ids.add(rid)
+                    # Normalise Lambda ARNs to their base form (strip version
+                    # qualifier) so the set matches what _collect_with_retry
+                    # looks up via _lambda_base_arn(parsed.asset_id).
+                    resource_ids.add(_lambda_base_arn(rid))
         logger.info(
             "Coverage filter: %d resource(s) scanned in the last %d hours.",
             len(resource_ids), lookback_hours,
