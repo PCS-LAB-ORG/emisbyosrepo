@@ -304,10 +304,18 @@ def _collect_with_retry(
                 continue
             parsed = _parse(raw)
             if parsed:
-                # For Lambda the asset_id is the versioned ARN (e.g. :$LATEST)
-                # but list_coverage returns the base ARN.  Normalise only for
-                # the lookup so each version stays a distinct Cortex asset.
-                coverage_check_id = _lambda_base_arn(parsed.asset_id)
+                # Normalise asset_id for the coverage-filter lookup:
+                # - Lambda: strip version qualifier (list_coverage returns base ARN)
+                # - ECR: extract bare digest (list_coverage returns sha256:... not
+                #        our full registry/repo@digest composite key)
+                # - EC2: no normalisation needed
+                raw_resource_type = raw.get("resources", [{}])[0].get("type", "")
+                if raw_resource_type == "AWS_LAMBDA_FUNCTION":
+                    coverage_check_id = _lambda_base_arn(parsed.asset_id)
+                elif raw_resource_type == "AWS_ECR_CONTAINER_IMAGE":
+                    coverage_check_id = _ecr_coverage_id(parsed.asset_id)
+                else:
+                    coverage_check_id = parsed.asset_id
                 if active_ids is not None and coverage_check_id not in active_ids:
                     logger.debug(
                         "Coverage filter: skipped finding for resource '%s' "
@@ -373,6 +381,17 @@ def _lambda_base_arn(arn: str) -> str:
     return arn
 
 
+def _ecr_coverage_id(asset_id: str) -> str:
+    """Extract the bare digest from an ECR asset_id for coverage-filter lookup.
+
+    We store asset_id as  registry/repo@sha256:...  for Cortex uniqueness,
+    but list_coverage returns just the raw digest (sha256:...) as resourceId.
+    """
+    if "@" in asset_id:
+        return asset_id.split("@", 1)[1]
+    return asset_id
+
+
 def _parse(raw: dict) -> RawFinding | None:
     resources = raw.get("resources", [])
     if not resources:
@@ -383,11 +402,12 @@ def _parse(raw: dict) -> RawFinding | None:
     aws_account = resource.get("providerAccountId", "")
 
     resource_type = resource.get("type", "")
+    ecr_asset_id = resource_id  # overridden below for ECR; kept as fallback for Lambda/EC2
     if resource_type == "AWS_ECR_CONTAINER_IMAGE":
         ecr = resource.get("details", {}).get("awsEcrContainerImage", {})
-        # Use the image digest as the asset name so each unique image layer is a
-        # distinct asset in Cortex.  The repo name is preserved in the tags below.
         image_hash = ecr.get("imageHash", "")
+        # asset_name = digest so each unique image is a distinct Cortex asset.
+        # The repo name is preserved in the tags below.
         asset_name = image_hash or resource_id
         # Tags can appear at the resource level and/or inside the detail block — merge both
         user_tags: dict = {
@@ -404,6 +424,15 @@ def _parse(raw: dict) -> RawFinding | None:
             if registry and region and repo else []
         )
         image_tags = ecr.get("imageTags", [])
+        # Build a globally unique asset_id: registry/repo@digest.
+        # Inspector2 returns resource.id as just the bare digest (sha256:...) which
+        # is NOT unique across repos or accounts — two repos that share the same
+        # base image will have the same digest but are distinct Cortex assets.
+        # Using registry/repo@digest guarantees uniqueness.
+        if registry and repo and image_hash:
+            ecr_asset_id = f"{registry}.dkr.ecr.{region}.amazonaws.com/{repo}@{image_hash}"
+        else:
+            ecr_asset_id = resource_id
         cloud_meta: list[str] = [
             "cloud:aws",
             "resource_type:ecr_container_image",
@@ -488,8 +517,10 @@ def _parse(raw: dict) -> RawFinding | None:
     score = raw.get("inspectorScore", 0)
     remediation = (raw.get("remediation") or {}).get("recommendation", {}).get("text", "")
     raw_output = f"score:{score} | {remediation}"[:2000]
+    # ECR uses ecr_asset_id (registry/repo@digest); all others use resource_id.
+    final_asset_id = ecr_asset_id if resource_type == "AWS_ECR_CONTAINER_IMAGE" else resource_id
     return RawFinding(
-        asset_id=resource_id,
+        asset_id=final_asset_id,
         asset_name=asset_name,
         ipv4=ipv4,
         ipv6=ipv6,

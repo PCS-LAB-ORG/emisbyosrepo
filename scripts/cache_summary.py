@@ -171,8 +171,29 @@ def _print_age_table(findings: list[dict], now_ms: int) -> None:
     print(div)
 
 
-def _print_ecr_repo_table(findings: list[dict]) -> None:
-    """Table: ECR images grouped by repo name, showing tags and digest per image."""
+def _drops_in(last_seen_ms: int, now_ms: int) -> tuple[str, str]:
+    """Return (label, colour) showing how long until Cortex drops this asset.
+
+    Cortex drops findings whose last_seen is > 30 days old.
+    """
+    expiry_ms  = last_seen_ms + THIRTY_DAYS_MS
+    remaining  = expiry_ms - now_ms   # ms until dropped; negative = already dropped
+    if remaining <= 0:
+        return _c(RED, "EXPIRED"), RED
+    days  = remaining // (24 * 60 * 60 * 1000)
+    hours = (remaining % (24 * 60 * 60 * 1000)) // (60 * 60 * 1000)
+    label = f"{days}d {hours}h" if days > 0 else f"{hours}h"
+    if days >= 7:
+        colour = GREEN
+    elif days >= 2:
+        colour = YELLOW
+    else:
+        colour = RED
+    return _c(colour, label), colour
+
+
+def _print_ecr_repo_table(findings: list[dict], now_ms: int) -> None:
+    """Table: ECR images grouped by repo name, showing tags, digest, and drop time."""
 
     ecr_findings = [
         f for f in findings
@@ -181,10 +202,14 @@ def _print_ecr_repo_table(findings: list[dict]) -> None:
     if not ecr_findings:
         return
 
-    # Deduplicate by asset_id; collect per-asset metadata
+    # Deduplicate by asset_id; track max last_seen_ms per asset
     seen: dict[str, dict] = {}
+    asset_max_seen: dict[str, int] = {}
     for f in ecr_findings:
         aid = f.get("asset_id", "")
+        lsm = f.get("last_seen_ms", 0)
+        if lsm > asset_max_seen.get(aid, 0):
+            asset_max_seen[aid] = lsm
         if aid in seen:
             continue
         tags = f.get("tags", [])
@@ -193,12 +218,11 @@ def _print_ecr_repo_table(findings: list[dict]) -> None:
         image_tags = [t.strip() for t in image_tags_raw.split(",") if t.strip()] if image_tags_raw else []
         digest = _tag_val(tags, "image_hash:", aid)
         short_digest = ("…" + digest[-12:]) if len(digest) > 12 else digest
-        acct = _account_id(tags)
         seen[aid] = {
-            "repo":        repo or "unknown",
-            "image_tags":  image_tags,
-            "digest":      short_digest,
-            "account":     acct,
+            "repo":       repo or "unknown",
+            "image_tags": image_tags,
+            "digest":     short_digest,
+            "aid":        aid,
         }
 
     # Group by repo
@@ -211,22 +235,33 @@ def _print_ecr_repo_table(findings: list[dict]) -> None:
     for f in ecr_findings:
         findings_per_asset[f.get("asset_id", "")] += 1
 
-    W_REPO   = max(16, max((len(r) for r in repos), default=0))
-    W_TAG    = max(12, max(
-        (len(", ".join(m["image_tags"]) or "—") for m in seen.values()),
-        default=0,
-    ))
-    W_TAG    = min(W_TAG, 40)   # cap so table doesn't get too wide
+    # Pre-compute drop labels for width calculation
+    drop_labels: dict[str, str] = {}
+    for aid in seen:
+        lsm = asset_max_seen.get(aid, 0)
+        label, _ = _drops_in(lsm, now_ms)
+        drop_labels[aid] = label
+
+    W_REPO  = max(16, max((len(r) for r in repos), default=0))
+    W_TAG   = min(40, max(12, max(
+        (len(", ".join(m["image_tags"]) or "—") for m in seen.values()), default=0,
+    )))
     W_DIGEST = 16
     W_IMGS   = 8
     W_CNT    = 10
+    W_DROP   = max(12, max(
+        (len(v.replace("\033[92m","").replace("\033[93m","").replace("\033[91m","").replace("\033[0m",""))
+         for v in drop_labels.values()),
+        default=0,
+    ))
 
     col_header = (
         f"  {'REPOSITORY':<{W_REPO}}  "
         f"{'DOCKER TAGS':<{W_TAG}}  "
         f"{'DIGEST (SHORT)':<{W_DIGEST}}  "
         f"{'# IMAGES':>{W_IMGS}}  "
-        f"{'FINDINGS':>{W_CNT}}"
+        f"{'FINDINGS':>{W_CNT}}  "
+        f"{'EXPIRES IN':<{W_DROP}}"
     )
     div      = _divider(len(col_header))
     bold_div = _divider(len(col_header), bold=True)
@@ -234,7 +269,6 @@ def _print_ecr_repo_table(findings: list[dict]) -> None:
     print(f"\n{bold_div}")
     print(f"{BOLD}  ECR IMAGE BREAKDOWN  —  {len(seen)} unique image(s) across {len(repos)} repo(s){RESET}")
     print(bold_div)
-    # Column header row — visually distinct from section title
     print(f"{BOLD}{col_header}{RESET}")
     print(div)
 
@@ -246,23 +280,20 @@ def _print_ecr_repo_table(findings: list[dict]) -> None:
             if meta["repo"] == repo
         )
         for i, meta in enumerate(images):
-            # First row of repo: show repo name; subsequent rows: indent arrow
+            aid      = meta["aid"]
             repo_str = _c(MAGENTA, repo) if i == 0 else _c(DIM, "  ↳")
             tag_str  = ", ".join(meta["image_tags"])[:W_TAG] or _c(DIM, "—")
             digest   = meta["digest"]
-            n_finds  = sum(
-                findings_per_asset[aid]
-                for aid, m in seen.items()
-                if m == meta
-            )
-            # # IMAGES column: show count on first row, blank on subsequent
+            n_finds  = findings_per_asset.get(aid, 0)
             imgs_str = str(len(images)) if i == 0 else ""
+            drop_str = drop_labels.get(aid, "—")
             print(
                 f"  {repo_str:<{W_REPO + 10}}  "
                 f"{tag_str:<{W_TAG}}  "
                 f"{digest:<{W_DIGEST}}  "
                 f"{imgs_str:>{W_IMGS}}  "
-                f"{n_finds:>{W_CNT}}"
+                f"{n_finds:>{W_CNT}}  "
+                f"{drop_str}"
             )
         # Repo subtotal row
         print(
@@ -289,6 +320,22 @@ def main() -> None:
         metavar="PATH",
         help=f"Path to the findings cache file (default: {DEFAULT_CACHE_FILE}).",
     )
+    parser.add_argument(
+        "--list-ids",
+        action="store_true",
+        help=(
+            "Print one origin_asset_id per line and exit — no summary tables. "
+            "Combine with --resource-type to scope to a single type. "
+            "Tip: pipe through 'sort | uniq -d' to surface any duplicates."
+        ),
+    )
+    parser.add_argument(
+        "--resource-type",
+        choices=["ecr", "lambda", "ec2"],
+        default=None,
+        metavar="TYPE",
+        help="When used with --list-ids, restrict output to ecr / lambda / ec2.",
+    )
     args = parser.parse_args()
 
     cache_path = args.cache_file
@@ -311,6 +358,36 @@ def main() -> None:
     coverage_hours = data.get("coverage_hours")
 
     now_ms = int(time.time() * 1000)
+
+    # ── --list-ids: print unique asset IDs and exit ───────────────────────────
+    if args.list_ids:
+        _TAG_FILTER = {
+            "ecr":    "resource_type:ecr_container_image",
+            "lambda": "resource_type:lambda_function",
+            "ec2":    "resource_type:ec2_instance",
+        }
+        seen_ids: dict[str, str] = {}   # asset_id -> resource_type label
+        for f in findings:
+            aid   = f.get("asset_id", "")
+            tags  = f.get("tags", [])
+            rtype = _resource_type(tags)
+            if args.resource_type and _TAG_FILTER.get(args.resource_type) not in tags:
+                continue
+            seen_ids[aid] = rtype
+
+        total = len(seen_ids)
+        # Group by type for the header line
+        by_type: dict[str, int] = defaultdict(int)
+        for rtype in seen_ids.values():
+            by_type[rtype] += 1
+        type_summary = "  ".join(f"{rtype}:{cnt}" for rtype, cnt in sorted(by_type.items()))
+        print(f"# {total} unique asset ID(s)  [{type_summary}]")
+        print(f"# source: {source}  cached_at: {cached_at}")
+        print(f"# Tip: pipe through  sort | uniq -d  to find duplicates")
+        print()
+        for aid in sorted(seen_ids.keys()):
+            print(aid)
+        sys.exit(0)
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     assets_by_type:   dict[str, set[str]] = defaultdict(set)
@@ -421,7 +498,7 @@ def main() -> None:
     _print_age_table(findings, now_ms)
 
     # ── ECR repo breakdown ────────────────────────────────────────────────────
-    _print_ecr_repo_table(findings)
+    _print_ecr_repo_table(findings, now_ms)
 
     # ── Import commands ───────────────────────────────────────────────────────
     print(f"\n{BOLD}  IMPORT COMMANDS{RESET}")

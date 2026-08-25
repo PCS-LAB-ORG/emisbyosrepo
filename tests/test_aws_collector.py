@@ -299,6 +299,25 @@ def test_ecr_finding_parsed_correctly():
     assert "dkr.ecr" in f.fqdn[0]
 
 
+def test_ecr_asset_id_is_registry_repo_digest():
+    """asset_id must be registry/repo@digest — NOT the bare digest.
+
+    Inspector2 returns resource.id as the bare sha256 digest, which is shared
+    across any repos/accounts that pull the same base image.  Using a bare
+    digest as origin_asset_id causes Cortex to collapse them into one asset.
+    """
+    mock_client, _ = _mock_paginator([_make_ecr_finding()])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+
+    f = findings[0]
+    # Expected: <registry>.dkr.ecr.<region>.amazonaws.com/<repo>@<digest>
+    expected = "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-app@sha256:abcd1234"
+    assert f.asset_id == expected, (
+        f"ECR asset_id should be registry/repo@digest for uniqueness, got: {f.asset_id!r}"
+    )
+
+
 def test_ecr_asset_name_is_image_digest():
     """asset_name must be the image digest, not the repo name."""
     mock_client, _ = _mock_paginator([_make_ecr_finding()])
