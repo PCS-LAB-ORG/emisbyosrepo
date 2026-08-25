@@ -101,6 +101,7 @@ def _build_expiry_batches(
     """Build BYOS batches with every last_seen set to expire_ms."""
     vendor, product = _VENDOR_MAP.get(source, ("AWS", "Inspector2"))
     max_assets = 45
+    max_batch_bytes = 9 * 1024 * 1024   # 9 MB — same cap as the normalizer
 
     # Filter by resource type if requested
     if resource_type_filter:
@@ -154,14 +155,27 @@ def _build_expiry_batches(
             "vulnerabilities": vulnerabilities,
         })
 
-    # Chunk into batches of max_assets
+    # Chunk into batches respecting both asset count and byte-size limits.
+    # ECR assets can carry thousands of CVEs; without a size cap the payload
+    # can exceed ~20 MB and cause a write-timeout mid-upload.
     batches = []
-    for i in range(0, len(assets), max_assets):
-        batches.append({
-            "vendor":  vendor,
-            "product": product,
-            "assets":  assets[i:i + max_assets],
-        })
+    current_assets: list[dict] = []
+    current_bytes = 0
+    base_overhead = len(json.dumps({"vendor": vendor, "product": product, "assets": []}).encode())
+
+    for asset in assets:
+        asset_bytes = len(json.dumps(asset).encode())
+        would_exceed_count = len(current_assets) >= max_assets
+        would_exceed_size  = current_bytes + asset_bytes + base_overhead > max_batch_bytes
+        if current_assets and (would_exceed_count or would_exceed_size):
+            batches.append({"vendor": vendor, "product": product, "assets": current_assets})
+            current_assets = []
+            current_bytes  = 0
+        current_assets.append(asset)
+        current_bytes += asset_bytes
+
+    if current_assets:
+        batches.append({"vendor": vendor, "product": product, "assets": current_assets})
 
     return batches
 
