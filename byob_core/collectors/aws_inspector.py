@@ -428,11 +428,15 @@ def _parse(raw: dict) -> RawFinding | None:
         ipv6: list = []
         registry = ecr.get("registry", "") or aws_account
         repo = ecr.get("repositoryName", "")
-        fqdn: list = (
-            [f"{registry}.dkr.ecr.{region}.amazonaws.com/{repo}"]
-            if registry and region and repo else []
-        )
         image_tags = ecr.get("imageTags", [])
+        # Include the first docker tag (or digest) in the fqdn so each image
+        # has a unique endpoint identifier.  Without this, all images in the
+        # same repo share the same fqdn and Cortex merges them into one asset.
+        if registry and region and repo:
+            tag_suffix = image_tags[0] if image_tags else image_hash
+            fqdn: list = [f"{registry}.dkr.ecr.{region}.amazonaws.com/{repo}:{tag_suffix}"]
+        else:
+            fqdn = []
         # Build a globally unique asset_id: registry/repo@digest.
         # Inspector2 returns resource.id as just the bare digest (sha256:...) which
         # is NOT unique across repos or accounts — two repos that share the same
