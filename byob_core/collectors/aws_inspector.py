@@ -158,10 +158,17 @@ def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
             for resource in page.get("coveredResources", []):
                 rid = resource.get("resourceId", "")
                 if rid:
-                    # Normalise Lambda ARNs to their base form (strip version
-                    # qualifier) so the set matches what _collect_with_retry
-                    # looks up via _lambda_base_arn(parsed.asset_id).
-                    resource_ids.add(_lambda_base_arn(rid))
+                    # Normalise per resource type:
+                    # - Lambda: strip version qualifier (list_coverage returns base ARN,
+                    #   list_findings returns versioned ARN)
+                    # - ECR: extract bare digest (list_coverage returns the full image URI
+                    #   e.g. registry/repo@sha256:... while we look up by digest only)
+                    rtype = resource.get("resourceType", "")
+                    if rtype == "AWS_ECR_CONTAINER_IMAGE":
+                        rid = _ecr_coverage_id(rid)
+                    else:
+                        rid = _lambda_base_arn(rid)
+                    resource_ids.add(rid)
         logger.info(
             "Coverage filter: %d resource(s) scanned in the last %d hours.",
             len(resource_ids), lookback_hours,
@@ -283,12 +290,16 @@ def _collect_with_retry(
     skipped_no_cve = 0
     skipped_no_resource = 0
     page_num = 0
+    raw_rtype_counts: dict[str, int] = {}  # raw resource types from Inspector2 before any filtering
     for page in paginator.paginate(**kwargs):
         page_num += 1
         page_findings = page.get("findings", [])
         page_kept = 0
         for raw in page_findings:
             raw_total += 1
+            # Track raw resource type counts for diagnostics
+            rtype = (raw.get("resources") or [{}])[0].get("type", "UNKNOWN")
+            raw_rtype_counts[rtype] = raw_rtype_counts.get(rtype, 0) + 1
             finding_type = raw.get("type", "UNKNOWN")
             if not raw.get("resources"):
                 skipped_no_resource += 1
@@ -337,6 +348,14 @@ def _collect_with_retry(
         f", coverage filter active ({len(active_ids)} resources)" if active_ids is not None else "",
         mode, page_num,
     )
+    logger.info("Resource type breakdown (raw from Inspector2): %s", raw_rtype_counts)
+    # Per-resource-type breakdown to aid debugging
+    from collections import Counter   # noqa: PLC0415
+    rtype_counts = Counter(
+        next((t[len("resource_type:"):] for t in f.tags if t.startswith("resource_type:")), "unknown")
+        for f in findings
+    )
+    logger.info("Resource type breakdown (kept): %s", dict(rtype_counts))
     if skipped_no_cve:
         logger.warning(
             "%d findings had no packageVulnerability.vulnerabilityId and were skipped. "

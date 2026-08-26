@@ -78,14 +78,25 @@ def _make_ecr_finding(severity: str = "HIGH") -> dict:
     }
 
 
-def _make_coverage_page(resource_ids: list[str]) -> dict:
-    """Return a fake list_coverage page for the given resource IDs."""
-    return {
-        "coveredResources": [
-            {"resourceId": rid, "lastScannedAt": datetime.datetime.now(tz=datetime.timezone.utc)}
-            for rid in resource_ids
-        ]
-    }
+def _make_coverage_page(resources: list[str | tuple]) -> dict:
+    """Return a fake list_coverage page.
+
+    Each entry can be a plain string resourceId (resourceType defaults to
+    AWS_EC2_INSTANCE) or a (resourceId, resourceType) tuple matching what
+    production list_coverage returns.
+    """
+    entries = []
+    for item in resources:
+        if isinstance(item, tuple):
+            rid, rtype = item
+        else:
+            rid, rtype = item, "AWS_EC2_INSTANCE"
+        entries.append({
+            "resourceId": rid,
+            "resourceType": rtype,
+            "lastScannedAt": datetime.datetime.now(tz=datetime.timezone.utc),
+        })
+    return {"coveredResources": entries}
 
 
 def _mock_paginator(findings: list[dict], covered_ids: list[str] | None = None):
@@ -97,23 +108,39 @@ def _mock_paginator(findings: list[dict], covered_ids: list[str] | None = None):
     base ARN (no qualifier) to match what list_coverage returns in production.
     Pass an explicit list (including empty list) to test coverage filtering.
     """
+    # Build coverage entries matching what production list_coverage returns:
+    # - Lambda: base ARN (no version qualifier), type AWS_LAMBDA_FUNCTION
+    # - ECR: full image URI (registry/repo@digest), type AWS_ECR_CONTAINER_IMAGE
+    # - EC2: raw instance ID, type AWS_EC2_INSTANCE
     if covered_ids is None:
-        covered_ids = []
+        coverage_entries: list[tuple] = []
         for f in findings:
             if not f.get("resources"):
                 continue
-            rid = f["resources"][0]["id"]
-            # Normalise Lambda ARNs to base form (strip :$LATEST / :N / :alias)
-            parts = rid.split(":")
-            if len(parts) == 8 and parts[5] == "function":
-                rid = ":".join(parts[:7])
-            covered_ids.append(rid)
+            res   = f["resources"][0]
+            rid   = res["id"]
+            rtype = res.get("type", "AWS_EC2_INSTANCE")
+            if rtype == "AWS_LAMBDA_FUNCTION":
+                parts = rid.split(":")
+                if len(parts) == 8 and parts[5] == "function":
+                    rid = ":".join(parts[:7])
+            elif rtype == "AWS_ECR_CONTAINER_IMAGE":
+                # Production list_coverage returns the full image URI for ECR
+                ecr   = res.get("details", {}).get("awsEcrContainerImage", {})
+                reg   = ecr.get("registry", "123456789012")
+                repo  = ecr.get("repositoryName", "unknown")
+                region = res.get("region", "us-east-1")
+                digest = ecr.get("imageHash", rid)
+                rid   = f"{reg}.dkr.ecr.{region}.amazonaws.com/{repo}@{digest}"
+            coverage_entries.append((rid, rtype))
+    else:
+        coverage_entries = [(rid, "AWS_EC2_INSTANCE") for rid in covered_ids]
 
     findings_pag = MagicMock()
     findings_pag.paginate.return_value = [{"findings": findings}]
 
     coverage_pag = MagicMock()
-    coverage_pag.paginate.return_value = [_make_coverage_page(covered_ids)]
+    coverage_pag.paginate.return_value = [_make_coverage_page(coverage_entries)]
 
     def _get_paginator(name: str) -> MagicMock:
         if name == "list_findings":

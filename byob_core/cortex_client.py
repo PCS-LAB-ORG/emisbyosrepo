@@ -110,12 +110,23 @@ def _submit_one(base: str, headers: dict, payload: dict) -> JobResult:
 
     resp = _post_with_rate_limit_retry(f"{base}{SUBMIT_PATH}", headers, payload)
 
-    if resp.status_code == 422:
-        errors = resp.json().get("detail", [])
-        logger.error("Cortex validation error: %s", errors)
-        raise CortexValidationError(f"Payload validation failed: {errors}")
-
-    resp.raise_for_status()
+    if not resp.ok:
+        # Log the response body (trimmed) so the real Cortex error message is visible
+        # without dumping the full request payload.
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text[:500]
+        if resp.status_code == 422:
+            errors = body.get("detail", []) if isinstance(body, dict) else body
+            logger.error("Cortex validation error (422): %s", errors)
+            raise CortexValidationError(f"Payload validation failed: {errors}")
+        logger.error(
+            "Cortex returned HTTP %d — response: %s",
+            resp.status_code,
+            str(body)[:1000],
+        )
+        resp.raise_for_status()
     data = resp.json()
     job_id = data["job_id"]
     assets_count = data.get("assets_count", 0)

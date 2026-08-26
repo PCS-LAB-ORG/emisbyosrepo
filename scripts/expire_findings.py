@@ -134,10 +134,11 @@ def _build_expiry_batches(
                 "vulnerability_id": cve,
                 "cve_id":           [cve],
                 "last_seen":        expire_ms,
-                "confidence":       "Potential",
-                "scan_name":        source,
+                "confidence":       "Confirmed" if f.get("severity", "") in ("CRITICAL", "HIGH") else "Potential",
                 "description":      f.get("description", "")[:500],
+                "evidence":         f.get("evidence", "")[:500],
                 "raw_output":       f.get("raw_output", "")[:500],
+                "scan_name":        source,
             })
 
         if not vulnerabilities:
@@ -303,7 +304,11 @@ def main() -> None:
                 )
             pushed += 1
         except Exception as exc:
-            logger.error("  Failed on batch %d: %s", i, exc)
+            # Print type + a short message only — avoids echoing the full payload
+            short = str(exc)
+            if len(short) > 300:
+                short = short[:300] + " ... [truncated]"
+            logger.error("  Failed on batch %d [%s]: %s", i, type(exc).__name__, short)
 
     logger.info(
         "Done — %d/%d batch(es) submitted.",
