@@ -438,17 +438,23 @@ def test_coverage_filter_keeps_active_asset():
 
 
 def test_coverage_filter_partial_filter():
-    """Only findings for assets in list_coverage are kept; others are dropped."""
+    """Coverage filter drops EC2/Lambda not in list_coverage, but ECR always passes.
+
+    ECR images are scanned once on push (not on a rolling schedule) so the
+    coverage filter is intentionally not applied to them — their findings remain
+    valid regardless of when the image was last pushed.
+    """
     ec2 = _make_ec2_finding()
     ecr = _make_ecr_finding()
     ec2_id = ec2["resources"][0]["id"]    # i-0abc123def456
-    ecr_id = ecr["resources"][0]["id"]   # sha256:abcd1234
-    # Only EC2 is in coverage (ECR image was pulled long ago)
+    # Only EC2 is in coverage — ECR image was pushed long ago
     mock_client, _ = _mock_paginator([ec2, ecr], covered_ids=[ec2_id])
     with patch("boto3.client", return_value=mock_client):
         findings = collect(mode="scheduled")
-    assert len(findings) == 1
-    assert findings[0].asset_id == ec2_id
+    # Both EC2 (in coverage) AND ECR (coverage skipped) should be kept
+    assert len(findings) == 2
+    resource_types = {f.asset_id for f in findings}
+    assert ec2_id in resource_types  # EC2 passed the coverage check
 
 
 def test_coverage_filter_disabled_via_env_var():

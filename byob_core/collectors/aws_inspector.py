@@ -158,17 +158,9 @@ def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
             for resource in page.get("coveredResources", []):
                 rid = resource.get("resourceId", "")
                 if rid:
-                    # Normalise per resource type:
-                    # - Lambda: strip version qualifier (list_coverage returns base ARN,
-                    #   list_findings returns versioned ARN)
-                    # - ECR: extract bare digest (list_coverage returns the full image URI
-                    #   e.g. registry/repo@sha256:... while we look up by digest only)
-                    rtype = resource.get("resourceType", "")
-                    if rtype == "AWS_ECR_CONTAINER_IMAGE":
-                        rid = _ecr_coverage_id(rid)
-                    else:
-                        rid = _lambda_base_arn(rid)
-                    resource_ids.add(rid)
+                    # Normalise Lambda ARNs to base form; ECR images bypass the
+                    # coverage filter entirely so no ECR normalisation needed here.
+                    resource_ids.add(_lambda_base_arn(rid))
         logger.info(
             "Coverage filter: %d resource(s) scanned in the last %d hours.",
             len(resource_ids), lookback_hours,
@@ -315,25 +307,23 @@ def _collect_with_retry(
                 continue
             parsed = _parse(raw)
             if parsed:
-                # Normalise asset_id for the coverage-filter lookup:
-                # - Lambda: strip version qualifier (list_coverage returns base ARN)
-                # - ECR: extract bare digest (list_coverage returns sha256:... not
-                #        our full registry/repo@digest composite key)
-                # - EC2: no normalisation needed
+                # Coverage filter — skip assets Inspector2 hasn't scanned recently.
+                # ECR images are scanned once on push (not on a rolling schedule) so
+                # they are intentionally excluded from the coverage check; their
+                # findings remain valid regardless of when the image was pushed.
                 raw_resource_type = raw.get("resources", [{}])[0].get("type", "")
-                if raw_resource_type == "AWS_LAMBDA_FUNCTION":
-                    coverage_check_id = _lambda_base_arn(parsed.asset_id)
-                elif raw_resource_type == "AWS_ECR_CONTAINER_IMAGE":
-                    coverage_check_id = _ecr_coverage_id(parsed.asset_id)
-                else:
-                    coverage_check_id = parsed.asset_id
-                if active_ids is not None and coverage_check_id not in active_ids:
-                    logger.debug(
-                        "Coverage filter: skipped finding for resource '%s' "
-                        "(not scanned in last 30 days).",
-                        parsed.asset_id,
-                    )
-                    continue
+                if raw_resource_type != "AWS_ECR_CONTAINER_IMAGE":
+                    if raw_resource_type == "AWS_LAMBDA_FUNCTION":
+                        coverage_check_id = _lambda_base_arn(parsed.asset_id)
+                    else:
+                        coverage_check_id = parsed.asset_id
+                    if active_ids is not None and coverage_check_id not in active_ids:
+                        logger.debug(
+                            "Coverage filter: skipped finding for resource '%s' "
+                            "(not scanned in last 30 days).",
+                            parsed.asset_id,
+                        )
+                        continue
                 findings.append(parsed)
                 page_kept += 1
         logger.info(
