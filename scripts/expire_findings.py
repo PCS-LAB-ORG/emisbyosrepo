@@ -123,27 +123,9 @@ def _build_expiry_batches(
     assets = []
     for asset_id, asset_findings in grouped.items():
         first = asset_findings[0]
-        vulnerabilities = []
-        seen_cves: set[str] = set()
-        for f in asset_findings:
-            cve = f.get("cve_id", "")
-            if not cve or cve in seen_cves:
-                continue
-            seen_cves.add(cve)
-            vulnerabilities.append({
-                "vulnerability_id": cve,
-                "cve_id":           [cve],
-                "last_seen":        expire_ms,
-                "confidence":       "Confirmed" if f.get("severity", "") in ("CRITICAL", "HIGH") else "Potential",
-                "description":      f.get("description", "")[:500],
-                "evidence":         f.get("evidence", "")[:500],
-                "raw_output":       f.get("raw_output", "")[:500],
-                "scan_name":        source,
-            })
-
-        if not vulnerabilities:
-            continue
-
+        # Submit with an empty vulnerabilities list so Cortex clears all findings
+        # for this asset immediately.  Combined with a backdated last_seen the
+        # asset itself will be dropped by Cortex on the next cleanup cycle.
         assets.append({
             "origin_asset_id": asset_id,
             "asset_name":      first.get("asset_name", asset_id),
@@ -153,7 +135,7 @@ def _build_expiry_batches(
             "os_name":         first.get("os_name"),
             "origin_tags":     first.get("tags", []),
             "last_seen":       expire_ms,
-            "vulnerabilities": vulnerabilities,
+            "vulnerabilities": [],
         })
 
     # Chunk into batches respecting both asset count and byte-size limits.
@@ -244,12 +226,9 @@ def main() -> None:
         sys.exit(0)
 
     total_assets = sum(len(b["assets"]) for b in batches)
-    total_vulns  = sum(
-        len(a["vulnerabilities"]) for b in batches for a in b["assets"]
-    )
     logger.info(
-        "Prepared %d batch(es) — %d unique asset(s), %d vuln(s) to expire.",
-        len(batches), total_assets, total_vulns,
+        "Prepared %d batch(es) — %d unique asset(s) to expire (no vulnerabilities posted).",
+        len(batches), total_assets,
     )
 
     if args.dry_run:
@@ -263,11 +242,11 @@ def main() -> None:
     print()
     print("  !! WARNING !!")
     print(f"  This will re-submit {total_assets} asset(s) to Cortex with")
-    print(f"  last_seen = {expire_iso} (29 days ago).")
+    print(f"  last_seen = {expire_iso} (29 days ago) and NO vulnerabilities.")
     scope = args.resource_type or "ALL resource types"
     print(f"  Scope: {scope}")
     print()
-    print("  Cortex will update these records to the backdated timestamp.")
+    print("  Cortex will clear all findings for these assets immediately.")
     print("  Assets should be eligible for expiry within ~24 hours.")
     print("  Run a fresh import AFTER Cortex has aged them out.")
     print()
@@ -292,9 +271,8 @@ def main() -> None:
     pushed = 0
     for i, batch in enumerate(batches, start=1):
         n_a = len(batch["assets"])
-        n_v = sum(len(a["vulnerabilities"]) for a in batch["assets"])
-        logger.info("Submitting batch %d/%d — %d asset(s), %d vuln(s) ...",
-                    i, len(batches), n_a, n_v)
+        logger.info("Submitting batch %d/%d — %d asset(s) (no vulns) ...",
+                    i, len(batches), n_a)
         try:
             results = cortex_client.submit_all([batch], creds)
             for r in results:
