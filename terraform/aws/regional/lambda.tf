@@ -22,6 +22,7 @@ resource "aws_lambda_function" "byob_scanner" {
       INSPECTOR2_COVERAGE_FILTER       = var.inspector2_coverage_filter
       INSPECTOR2_SEVERITIES            = var.inspector2_severities
       INSPECTOR2_STATUSES              = var.inspector2_statuses
+      INSPECTOR2_CLAMP_OLD             = var.inspector2_clamp_old
     }
   }
 }

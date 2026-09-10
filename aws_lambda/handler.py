@@ -99,7 +99,8 @@ def lambda_handler(event: dict, context: Any) -> dict:
         # ── normalise ─────────────────────────────────────────────────────────
         logger.info("Normalising %d findings ...", len(findings))
         t0 = time.time()
-        batches = normalizer.normalize(findings, "aws_inspector")
+        clamp_old = os.environ.get("INSPECTOR2_CLAMP_OLD", "true").lower() == "true"
+        batches = normalizer.normalize(findings, "aws_inspector", clamp_old_findings=clamp_old)
         total_assets = sum(len(b.get("assets", [])) for b in batches)
         total_vulns = sum(
             len(a.get("vulnerabilities", []))

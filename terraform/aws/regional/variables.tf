@@ -47,3 +47,9 @@ variable "inspector2_coverage_filter" {
   default     = "true"
   description = "Set to 'false' to disable the list-coverage pre-filter (e.g. if the IAM role lacks inspector2:ListCoverage)."
 }
+
+variable "inspector2_clamp_old" {
+  type        = string
+  default     = "true"
+  description = "Set to 'true' to include assets whose last_seen is older than 30 days, clamping their timestamp to import time so Cortex accepts them."
+}

@@ -755,8 +755,8 @@ def main() -> None:
             logger.info("Collected %d findings.", len(findings))
 
             if args.cache_findings:
-                if args.source != "aws":
-                    logger.warning("--cache-findings is only supported with --source aws; skipped.")
+                if args.source not in ("aws", "azure"):
+                    logger.warning("--cache-findings is not supported for source '%s'; skipped.", args.source)
                 else:
                     _save_findings_cache(
                         findings, cache_path,
