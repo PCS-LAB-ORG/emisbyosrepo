@@ -44,3 +44,4 @@ docs/superpowers/
 # Stray / duplicate files
 .gitingore
 .byob-batches/
+test_data/mock_findings_cache.json.gz
