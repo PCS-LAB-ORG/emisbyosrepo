@@ -105,7 +105,12 @@ def _save_findings_cache(
             for f in findings
         ],
     }
-    cache_path.write_text(json.dumps(data, indent=2))
+    raw = json.dumps(data, indent=2).encode()
+    if str(cache_path).endswith(".gz"):
+        import gzip
+        cache_path.write_bytes(gzip.compress(raw))
+    else:
+        cache_path.write_bytes(raw)
     logger.info(
         "Cached %d finding(s) to '%s' (cached_at=%s).",
         len(findings), cache_path, data["cached_at"],
@@ -124,7 +129,12 @@ def _load_findings_cache(cache_path: pathlib.Path) -> tuple[list, dict]:
         sys.exit(1)
 
     try:
-        data = json.loads(cache_path.read_text())
+        if str(cache_path).endswith(".gz"):
+            import gzip
+            with gzip.open(cache_path, "rb") as fh:
+                data = json.loads(fh.read())
+        else:
+            data = json.loads(cache_path.read_text())
     except Exception as exc:
         logger.error("Failed to read cache file '%s': %s", cache_path, exc)
         sys.exit(1)

@@ -248,8 +248,12 @@ Global resources (destroyed last — shared across all regions):
 - [Asset tags sent to Cortex XDR](#asset-tags-sent-to-cortex-xdr)
 - [Development setup](#development-setup)
 - [Running tests](#running-tests)
+- [Test data](#test-data)
 - [Integration test](#integration-test)
 - [30-day age filter, coverage filter, and timestamp clamping](#30-day-age-filter-coverage-filter-and-timestamp-clamping)
+- [Azure multi-subscription scanning](#azure-multi-subscription-scanning)
+- [Expiring stale findings](#expiring-stale-findings)
+- [Cache summary](#cache-summary)
 - [Queued batch push](#queued-batch-push)
   - [When to use it](#when-to-use-it)
   - [Typical workflow](#typical-workflow)
@@ -298,8 +302,13 @@ terraform/
 scripts/
   deploy.sh                 interactive one-command deployment
   integration_test.py       dry-run / live test helper
-  batch_push.py             queued batch push with resume support
+  batch_push.py             queued batch push with resume support; --cache-findings saves a local JSON snapshot
+  expire_findings.py        post empty vulnerability lists to Cortex to clear findings for decommissioned assets
+  cache_summary.py          pretty-print a findings cache file — asset/vuln counts, EXPIRES IN column, --list-ids flag
 tests/                      unit tests (pytest)
+test_data/
+  generate_mock_data.py     generates a mock AWS findings cache (4,600 assets / 103 batches)
+  mock_findings_cache.json.gz  generated output — gitignored (~7 MB gzip, ~81 MB uncompressed); run generate_mock_data.py to create
 ```
 
 ---
@@ -489,6 +498,7 @@ One Terraform workspace per region.
 | `schedule_expression` | `rate(6 hours)` | EventBridge cron schedule |
 | `inspector2_statuses` | `ACTIVE` | Comma-separated finding statuses to collect |
 | `inspector2_severities` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated severities to collect |
+| `inspector2_clamp_old` | `true` | Set to `false` to drop assets older than 30 days instead of clamping their `last_seen`. Maps to the `INSPECTOR2_CLAMP_OLD` Lambda env var. |
 | `inspector2_lookback_hours` | `12` | Only return findings updated in the last N hours. Lambda default is `12` (tight delta). Code default when env var unset is `720` (30 days — matches Cortex API limit). `0` = no time filter |
 
 **Outputs:**
@@ -540,6 +550,7 @@ These are set automatically by Terraform — no manual configuration needed.
 | `INSPECTOR2_LOOKBACK_HOURS` | `12` (Lambda) / `720` (code default) | Only return findings updated in the last N hours. Lambda is set to `12` for a tight 6-hour delta. Code default when unset is `720` (30 days), matching the Cortex API hard limit — findings older than 30 days are rejected with HTTP 422. Set to `0` to disable. |
 | `INSPECTOR2_COVERAGE_FILTER` | `true` | Set to `false` to skip the `list-coverage` pre-check (e.g. if the IAM role lacks `inspector2:ListCoverage`). |
 | `INSPECTOR2_COVERAGE_HOURS` | `720` (30 days) | The `lastScannedAt` window for the coverage filter. Only assets scanned within this many hours are included. Set to `72` to restrict to assets scanned in the last 3 days. |
+| `INSPECTOR2_CLAMP_OLD` | `true` | Set to `false` to drop assets whose most-recent vuln is older than 30 days instead of clamping their `last_seen` to import time. When `true`, stale assets are included and tagged `over30day:true`. |
 
 To change the filters after deployment without redeploying, update the Lambda environment variables directly in the AWS console or via the CLI:
 
@@ -556,7 +567,9 @@ aws lambda update-function-configuration \
 |---|---|
 | `CORTEX_KEYVAULT_URL` | Key Vault URI (e.g. `https://byob-scanner-kv.vault.azure.net/`) |
 | `CORTEX_SECRET_NAME` | Key Vault secret name |
-| `AZURE_SUBSCRIPTION_ID` | Subscription ID used by the Resource Graph collector |
+| `AZURE_SUBSCRIPTION_ID` | Single subscription ID (GUID). Used when neither `AZURE_MANAGEMENT_GROUP_ID` nor `AZURE_SUBSCRIPTION_IDS` is set. |
+| `AZURE_SUBSCRIPTION_IDS` | Comma-separated list of subscription GUIDs to scan. Display names are auto-resolved to GUIDs at runtime. Takes precedence over `AZURE_SUBSCRIPTION_ID`. |
+| `AZURE_MANAGEMENT_GROUP_ID` | Management group ID. When set, Resource Graph fans out across all subscriptions under the group automatically. Takes precedence over both subscription variables. |
 
 ---
 
@@ -605,7 +618,11 @@ Every asset pushed to Cortex includes cloud metadata tags alongside any user-def
 | `image_tags:<tags>` | `image_tags:latest,v1.0` |
 | User tags (from resource) | `team:platform` |
 
-> The `Name` tag is used as the asset name and is not duplicated in the tag list.
+> **`origin_asset_id`** for ECR images uses the fully-qualified digest format: `<registry>.dkr.ecr.<region>.amazonaws.com/<repo>@sha256:<digest>`. This guarantees uniqueness across repositories even when the same digest is tagged in multiple repos.
+>
+> **`fqdn`** includes the docker tag to prevent Cortex from merging images that share the same registry hostname: `<registry>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>`.
+>
+> **`asset_name`** is set to the image digest (`sha256:<digest>`) so each image is identifiable by its immutable content hash.
 
 ---
 
@@ -616,6 +633,83 @@ pytest tests/ -v
 ```
 
 All 52 unit tests run entirely offline — no AWS or Azure credentials required.
+
+---
+
+## Test data
+
+`test_data/generate_mock_data.py` generates a realistic AWS Inspector2 findings cache file large enough to exercise the full batch pipeline — including resume, rate-limit handling, and byte-size splitting.
+
+### What it generates
+
+| Asset type | Assets | Findings | Notes |
+|---|---|---|---|
+| EC2 instances | 2,000 | ~25,000 | 5 accounts × 4 regions × 100 instances |
+| Lambda functions | 1,100 | ~8,000 | 5 accounts × 4 regions × 55 functions |
+| ECR images | 1,500 | ~38,000 | 5 accounts × 3 repos × 100 images |
+| **Total** | **4,600** | **~71,000** | **103 batch files at 45 assets/batch** |
+
+All assets are within the 30-day window so nothing is dropped by the age filter. Severities, CVE IDs, IP addresses, regions, and account IDs are randomised from realistic pools using a fixed seed (reproducible).
+
+### Generate the cache file
+
+```bash
+# Default output: test_data/mock_findings_cache.json.gz  (~7 MB, gitignored)
+python3 test_data/generate_mock_data.py
+
+# Custom output path
+python3 test_data/generate_mock_data.py --out /tmp/mock.json.gz
+
+# Uncompressed (if needed)
+python3 test_data/generate_mock_data.py --out test_data/mock_findings_cache.json
+
+# Different random seed (produces different asset/CVE distribution)
+python3 test_data/generate_mock_data.py --seed 123
+```
+
+Generation takes under 1 second. The output file is compressed to ~7 MB (from ~81 MB uncompressed, 11.6× ratio) using gzip and is excluded from git (`.gitignore`). Both `.json` and `.json.gz` files are transparently supported by `batch_push.py` and `cache_summary.py` — no manual decompression needed.
+
+### Use the cache file with batch_push
+
+```bash
+# Create all 103 batch files without pushing (inspect them first)
+python3 scripts/batch_push.py \
+  --source aws \
+  --from-cache \
+  --cache-file test_data/mock_findings_cache.json.gz \
+  --download-only \
+  --yes
+
+# Push all batches to Cortex (requires credentials)
+python3 scripts/batch_push.py \
+  --source aws \
+  --from-cache \
+  --cache-file test_data/mock_findings_cache.json.gz \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+
+# Filter to ECR images only
+python3 scripts/batch_push.py \
+  --source aws \
+  --from-cache \
+  --cache-file test_data/mock_findings_cache.json.gz \
+  --resource-type ecr \
+  --download-only --yes
+```
+
+### Inspect the cache file
+
+```bash
+# Full summary — asset counts, vuln counts, EXPIRES IN column
+python3 scripts/cache_summary.py --cache-file test_data/mock_findings_cache.json.gz
+
+# ECR repo table only
+python3 scripts/cache_summary.py --cache-file test_data/mock_findings_cache.json.gz --resource-type ecr
+
+# List every origin_asset_id (for duplicate checking)
+python3 scripts/cache_summary.py --cache-file test_data/mock_findings_cache.json.gz --list-ids
+```
 
 ---
 
@@ -744,7 +838,72 @@ After the coverage check, the normalizer applies an **asset-level age filter** b
 
 ---
 
-## Queued batch push
+## Azure multi-subscription scanning
+
+By default the Azure collector scans a single subscription (`AZURE_SUBSCRIPTION_ID`). Two additional env vars unlock broader scope:
+
+| Variable | Behaviour |
+|---|---|
+| `AZURE_MANAGEMENT_GROUP_ID` | Scan all subscriptions under the management group. Resource Graph fans out automatically — no subscription enumeration needed. **Highest precedence.** |
+| `AZURE_SUBSCRIPTION_IDS` | Comma-separated list of subscription IDs or **display names**. Display names are auto-resolved to GUIDs at startup via the Azure Subscription API. Takes precedence over `AZURE_SUBSCRIPTION_ID`. |
+| `AZURE_SUBSCRIPTION_ID` | Single subscription ID or display name. Fallback when the other two vars are not set. |
+
+**Examples:**
+
+```bash
+# Scan a management group (all child subscriptions)
+export AZURE_MANAGEMENT_GROUP_ID=my-management-group
+
+# Scan two specific subscriptions by GUID
+export AZURE_SUBSCRIPTION_IDS=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy
+
+# Scan by display name (auto-resolved to GUID at runtime)
+export AZURE_SUBSCRIPTION_IDS=AzurePCSLab-SemiUNTRUST,AzurePCSLab-TRUST
+
+# Cache findings without pushing (useful for inspection / debugging)
+python3 scripts/batch_push.py --source azure --cache-findings
+```
+
+> ⚠️ Subscription display names are resolved using your current Azure credentials. The identity running the script needs `Microsoft.Resources/subscriptions/read` permission on each subscription (included in the built-in **Reader** role).
+
+---
+
+## Expiring stale findings
+
+`scripts/expire_findings.py` clears findings in Cortex for assets that have been decommissioned or are no longer returning data from the scanner. It reads a findings cache file (produced by `--cache-findings`) and posts empty vulnerability lists for assets whose `last_seen` is older than a configurable threshold.
+
+```bash
+# Expire assets not seen in the last 30 days
+python3 scripts/expire_findings.py \
+  --cache-file .byob-findings-cache-aws.json \
+  --cortex-fqdn   api-tenant.xdr.us.paloaltonetworks.com \
+  --cortex-api-key <key> \
+  --cortex-auth-id <id>
+```
+
+Posting an empty `"vulnerabilities": []` list immediately clears all findings for that asset in Cortex. The asset itself will then age out naturally after 30 days of no activity.
+
+---
+
+## Cache summary
+
+`scripts/cache_summary.py` prints a human-readable summary of a findings cache file without hitting any cloud APIs.
+
+```bash
+# Summary of an AWS findings cache
+python3 scripts/cache_summary.py --cache-file .byob-findings-cache-aws.json
+
+# Filter to ECR images only
+python3 scripts/cache_summary.py --cache-file .byob-findings-cache-aws.json --resource-type ecr
+
+# Print the origin_asset_id of every asset (for manual duplicate checking)
+python3 scripts/cache_summary.py --cache-file .byob-findings-cache-aws.json --list-ids
+python3 scripts/cache_summary.py --cache-file .byob-findings-cache-aws.json --list-ids --resource-type ecr
+```
+
+The ECR repo table includes an **EXPIRES IN** column showing how long until Cortex drops each image (green ≥ 7 days · yellow 2–6 days · red < 2 days · red EXPIRED).
+
+---
 
 `scripts/batch_push.py` solves a problem that `integration_test.py --post` cannot: **what happens if Cortex errors or rate-limits midway through pushing a large set of findings?** With the integration test you would have to re-query Inspector2 or Azure from the beginning and re-send every batch. The queued batch push avoids that by saving every batch as a local JSON file first, then pushing one file at a time and **deleting it only after Cortex accepts it**. If the run is interrupted for any reason, the remaining files stay on disk and the next run resumes exactly where it stopped.
 
@@ -923,6 +1082,8 @@ After Cortex accepts each batch the file is deleted. If the run is interrupted, 
 | `--severities` | `LOW,MEDIUM,HIGH,CRITICAL` | Comma-separated severity levels. AWS only. |
 | `--statuses` | `ACTIVE` | Comma-separated finding statuses. AWS only. |
 | `--region` | `AWS_DEFAULT_REGION` or `us-east-1` | AWS region for Inspector2. AWS only. |
+| `--cache-findings` | off | Save a local JSON cache of all collected findings before batching. Useful for re-normalising or debugging without re-querying the scanner. Works for both `aws` and `azure` sources. |
+| `--cache-file` | `.byob-findings-cache-<source>.json` | Path for the findings cache file written by `--cache-findings`. |
 | `--cortex-fqdn` | `CORTEX_FQDN` env var | Cortex API URL |
 | `--cortex-api-key` | `CORTEX_API_KEY` env var | Cortex API key |
 | `--cortex-auth-id` | `CORTEX_AUTH_ID` env var | Cortex API key ID |

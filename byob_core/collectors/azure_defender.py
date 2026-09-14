@@ -21,12 +21,8 @@ logger = logging.getLogger(__name__)
 # Suppress noisy Azure SDK HTTP wire logs
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 logging.getLogger("azure.identity").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-# Suppress verbose Azure SDK HTTP logging
-logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
-logging.getLogger("azure.identity").setLevel(logging.WARNING)
 logging.getLogger("azure.mgmt").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 _BASE_QUERY = (
     "securityresources "
