@@ -22,7 +22,7 @@ _DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 # Filtering — controlled via environment variables so customers can tune
 # without code changes or redeployment (just update the Lambda env vars).
 #
-#   INSPECTOR2_STATUSES        comma-separated; default: ACTIVE
+#   INSPECTOR2_STATUSES        comma-separated; default: ACTIVE,CLOSED
 #                              Valid values: ACTIVE, SUPPRESSED, CLOSED
 #
 #   INSPECTOR2_SEVERITIES      comma-separated; default: MEDIUM,HIGH,CRITICAL
@@ -195,9 +195,9 @@ def collect(
     client = boto3.client("inspector2", region_name=region or _DEFAULT_REGION)
 
     if statuses is not None:
-        resolved_statuses = _parse_raw_list(statuses, _VALID_STATUSES, ["ACTIVE"], "statuses")
+        resolved_statuses = _parse_raw_list(statuses, _VALID_STATUSES, ["ACTIVE", "CLOSED"], "statuses")
     else:
-        resolved_statuses = _parse_env_list("INSPECTOR2_STATUSES", _VALID_STATUSES, ["ACTIVE"])
+        resolved_statuses = _parse_env_list("INSPECTOR2_STATUSES", _VALID_STATUSES, ["ACTIVE", "CLOSED"])
 
     if severities is not None:
         resolved_severities = _parse_raw_list(severities, _VALID_SEVERITIES, ["MEDIUM", "HIGH", "CRITICAL","LOW"], "severities")
@@ -518,6 +518,11 @@ def _parse(raw: dict) -> RawFinding | None:
 
     # Cloud metadata first, then user-defined resource tags (excluding Name — used as asset_name)
     tags = cloud_meta + [f"{k}:{v}" for k, v in user_tags.items() if k != "Name"]
+
+    # Include the Inspector finding status (ACTIVE / SUPPRESSED / CLOSED)
+    finding_status = raw.get("status", "")
+    if finding_status:
+        tags.append(f"status:{finding_status}")
 
     # Inspector2 API returns the field as "packageVulnerabilityDetails"
     pkg_vuln = raw.get("packageVulnerabilityDetails") or raw.get("packageVulnerability") or {}

@@ -345,7 +345,12 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        data = json.loads(open(cache_path).read())
+        if str(cache_path).endswith(".gz"):
+            import gzip
+            with gzip.open(cache_path, "rb") as fh:
+                data = json.loads(fh.read())
+        else:
+            data = json.loads(open(cache_path).read())
     except Exception as exc:
         print(f"\n\033[91mFailed to read '{cache_path}': {exc}{RESET}\n")
         sys.exit(1)

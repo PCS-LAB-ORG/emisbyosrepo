@@ -45,3 +45,4 @@ docs/superpowers/
 .gitingore
 .byob-batches/
 test_data/mock_findings_cache.json.gz
+test_data/.env
