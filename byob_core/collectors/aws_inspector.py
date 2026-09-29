@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 from datetime import datetime, timezone
@@ -535,6 +536,7 @@ def _parse(raw: dict) -> RawFinding | None:
     score = raw.get("inspectorScore", 0)
     remediation = (raw.get("remediation") or {}).get("recommendation", {}).get("text", "")
     raw_output = f"score:{score} | {remediation}"[:2000]
+    evidence = json.dumps({"status": finding_status}) if finding_status else json.dumps({"status": "UNKNOWN"})
     # ECR uses ecr_asset_id (registry/repo@digest); all others use resource_id.
     final_asset_id = ecr_asset_id if resource_type == "AWS_ECR_CONTAINER_IMAGE" else resource_id
     return RawFinding(
@@ -550,7 +552,7 @@ def _parse(raw: dict) -> RawFinding | None:
         cve_id=cve_id,
         severity=raw.get("severity", "MEDIUM"),
         description=raw.get("description", ""),
-        evidence=f"CVSS: {pkg_vuln.get('cvss', [])}",
+        evidence=evidence,
         raw_output=raw_output,
         source="aws_inspector",
     )

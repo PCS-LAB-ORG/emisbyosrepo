@@ -239,8 +239,8 @@ def _finding(
         "cve_id":      cve_id,
         "severity":    severity,
         "description": DESCRIPTIONS[severity],
-        "evidence":    f"CVSS:{rng.uniform(1.0,10.0):.1f} AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-        "raw_output":  f"Package affected, fixed in patched version. Score: {rng.uniform(1.0,10.0):.1f}",
+        "evidence":    json.dumps({"status": rng.choices(["ACTIVE", "ACTIVE", "ACTIVE", "SUPPRESSED", "CLOSED"], k=1)[0]}),
+        "raw_output":  f"score:{rng.uniform(1.0,10.0):.1f} | Update the affected package to the latest patched version to remediate this vulnerability.",
         "source":      "aws_inspector",
     }
 

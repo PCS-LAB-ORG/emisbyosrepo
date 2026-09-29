@@ -329,7 +329,9 @@ def _parse(row: dict) -> RawFinding | None:
         cloud_meta.append(f"image_digest:{image_digest}")
 
     severity = (props.get("severity") or {}).get("severity", "Medium").upper()
-    evidence = str(additional.get("cvss", ""))[:2000]
+    finding_status = (props.get("status") or {}).get("code", "UNKNOWN")
+    evidence = json.dumps({"status": finding_status})
+    raw_output = str(additional.get("cvss", ""))[:2000]
     time_generated = props.get("timeGenerated", "")
     try:
         dt = datetime.datetime.fromisoformat(time_generated.replace("Z", "+00:00"))
@@ -351,6 +353,6 @@ def _parse(row: dict) -> RawFinding | None:
         severity=severity,
         description=props.get("description", ""),
         evidence=evidence,
-        raw_output=evidence,
+        raw_output=raw_output,
         source="azure_defender",
     )
