@@ -181,7 +181,11 @@ def test_collect_returns_empty_on_no_findings():
 # Scheduled-mode filter criteria
 # ---------------------------------------------------------------------------
 def test_scheduled_filter_uses_status_and_severity_defaults():
-    """Default filters: status=ACTIVE, severity in MEDIUM/HIGH/CRITICAL/LOW."""
+    """Default filters: status in ACTIVE/CLOSED, severity in MEDIUM/HIGH/CRITICAL/LOW.
+
+    CLOSED is collected alongside ACTIVE so previously-reported vulns get closed
+    out in Cortex rather than lingering as active.
+    """
     mock_client, mock_pag = _mock_paginator([])
     clean_env = {"INSPECTOR2_SEVERITIES": "", "INSPECTOR2_STATUSES": ""}
     with patch("boto3.client", return_value=mock_client), patch.dict(os.environ, clean_env):
@@ -193,7 +197,7 @@ def test_scheduled_filter_uses_status_and_severity_defaults():
     status_values = {e["value"] for e in fc["findingStatus"]}
     severity_values = {e["value"] for e in fc["severity"]}
 
-    assert status_values == {"ACTIVE"}
+    assert status_values == {"ACTIVE", "CLOSED"}
     assert severity_values == {"MEDIUM", "HIGH", "CRITICAL", "LOW"}
 
 
