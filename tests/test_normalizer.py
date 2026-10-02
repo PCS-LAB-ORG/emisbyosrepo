@@ -1,3 +1,4 @@
+import json
 import time
 import pytest
 from byob_core.models import RawFinding
@@ -9,7 +10,7 @@ def _now_ms():
 
 
 def _make_finding(asset_id="i-abc", severity="CRITICAL", source="aws_inspector",
-                  last_seen_ms=None, cve_id="CVE-2024-12345"):
+                  last_seen_ms=None, cve_id="CVE-2024-12345", evidence="CVSS 9.8"):
     return RawFinding(
         asset_id=asset_id,
         asset_name="web-1",
@@ -23,7 +24,7 @@ def _make_finding(asset_id="i-abc", severity="CRITICAL", source="aws_inspector",
         cve_id=cve_id,
         severity=severity,
         description="A vuln",
-        evidence="CVSS 9.8",
+        evidence=evidence,
         raw_output="score: 9.8",
         source=source,
     )
@@ -229,3 +230,173 @@ def test_normalize_raises_on_unknown_source():
     f = _make_finding()
     with pytest.raises(ValueError, match="Unknown source"):
         normalize([f], "unknown_scanner")
+
+
+# --- Per-asset vulnerability_id deduplication -------------------------------
+# Cortex rejects a payload (HTTP 422) when the same vulnerability_id appears
+# twice within one asset. AWS Inspector emits one finding per vulnerable
+# package, so a single CVE can legitimately arrive multiple times for one
+# instance. Collapse to one entry per CVE, preferring the finding that still
+# represents a live risk.
+
+
+def _status(code):
+    return json.dumps({"status": code})
+
+
+def test_normalize_dedupes_duplicate_cve_within_asset():
+    """The same CVE twice on one asset must collapse to a single entry."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2023-38180", last_seen_ms=now - 1000),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2023-38180", last_seen_ms=now - 5000),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert vulns[0]["vulnerability_id"] == "CVE-2023-38180"
+
+
+def test_normalize_dedupe_prefers_active_over_newer_closed():
+    """A CLOSED finding must not mask an ACTIVE one for the same CVE, even when newer.
+
+    Inspector stamps last_seen from updatedAt, so closing a finding bumps its
+    timestamp past a still-open finding for the same CVE on another package.
+    """
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2023-38180",
+                      last_seen_ms=now - 1000, evidence=_status("CLOSED")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2023-38180",
+                      last_seen_ms=now - 5123, evidence=_status("ACTIVE")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert json.loads(vulns[0]["evidence"])["status"] == "ACTIVE"
+    assert vulns[0]["last_seen"] == now - 5123
+
+
+def test_normalize_dedupe_prefers_newest_when_statuses_match():
+    """With both copies CLOSED, the most recent finding wins."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2026-42899",
+                      last_seen_ms=now - 7_710_000, evidence=_status("CLOSED")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2026-42899",
+                      last_seen_ms=now - 1000, evidence=_status("CLOSED")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert vulns[0]["last_seen"] == now - 1000
+
+
+def test_normalize_dedupe_prefers_active_over_suppressed():
+    """SUPPRESSED is not a live risk — an ACTIVE copy of the same CVE wins."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 1000, evidence=_status("SUPPRESSED")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 9000, evidence=_status("ACTIVE")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert json.loads(vulns[0]["evidence"])["status"] == "ACTIVE"
+
+
+def test_normalize_dedupe_prefers_highest_severity_within_same_status():
+    """Two ACTIVE copies: keep the one with the more serious severity."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001", severity="LOW",
+                      last_seen_ms=now - 1000, evidence=_status("ACTIVE")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001", severity="CRITICAL",
+                      last_seen_ms=now - 9000, evidence=_status("ACTIVE")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert vulns[0]["confidence"] == "Confirmed"  # CRITICAL → Confirmed
+
+
+def test_normalize_dedupe_is_per_asset_not_global():
+    """The same CVE on two different assets must be kept on both."""
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001"),
+        _make_finding(asset_id="i-def", cve_id="CVE-2024-0001"),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    assets = {a["origin_asset_id"]: a for a in batches[0]["assets"]}
+    assert len(assets) == 2
+    assert len(assets["i-abc"]["vulnerabilities"]) == 1
+    assert len(assets["i-def"]["vulnerabilities"]) == 1
+
+
+def test_normalize_dedupe_handles_unparseable_evidence():
+    """Non-JSON evidence must not raise — fall back to newest last_seen."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 1000, evidence="not json at all"),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 9000, evidence=""),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert vulns[0]["last_seen"] == now - 1000
+
+
+def test_normalize_dedupe_runs_before_per_asset_vuln_cap():
+    """Dedup must happen before truncation so duplicates don't consume cap slots."""
+    from byob_core.normalizer import MAX_VULNS_PER_ASSET
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id=f"CVE-2024-{n:05d}")
+        for n in range(MAX_VULNS_PER_ASSET)
+    ]
+    # Duplicate the first 50 CVEs — without pre-truncation dedup these would
+    # push 50 distinct CVEs past the cap.
+    findings += [
+        _make_finding(asset_id="i-abc", cve_id=f"CVE-2024-{n:05d}")
+        for n in range(50)
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == MAX_VULNS_PER_ASSET
+    assert len({v["vulnerability_id"] for v in vulns}) == MAX_VULNS_PER_ASSET
+
+
+def test_normalize_no_duplicate_vulnerability_ids_in_any_asset():
+    """Contract Cortex enforces: vulnerability_id is unique within each asset."""
+    now = _now_ms()
+    findings = []
+    for asset in ("i-abc", "i-def"):
+        for n in range(20):
+            for copy, status in enumerate(("CLOSED", "ACTIVE")):
+                findings.append(_make_finding(
+                    asset_id=asset, cve_id=f"CVE-2024-{n:05d}",
+                    last_seen_ms=now - 1000 * copy, evidence=_status(status),
+                ))
+    batches = normalize(findings, "aws_inspector")
+    for batch in batches:
+        for a in batch["assets"]:
+            ids = [v["vulnerability_id"] for v in a["vulnerabilities"]]
+            assert len(ids) == len(set(ids)), f"duplicates in {a['origin_asset_id']}"
+
+
+def test_normalize_dedupe_asset_last_seen_reflects_surviving_vulns():
+    """Asset last_seen must come from the kept entries, not the discarded ones."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 1000, evidence=_status("CLOSED")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 5000, evidence=_status("ACTIVE")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    asset = batches[0]["assets"][0]
+    assert asset["last_seen"] == now - 5000
+

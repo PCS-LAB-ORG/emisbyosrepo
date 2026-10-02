@@ -35,6 +35,67 @@ _SEVERITY_ORDER: dict[str, int] = {
     "UNTRIAGED": 5,
 }
 
+# Finding statuses that no longer represent a live risk. When the same CVE
+# appears more than once on an asset, a finding in one of these states loses to
+# any finding that is not.
+_RESOLVED_STATUSES = frozenset({"CLOSED", "RESOLVED", "SUPPRESSED", "DISMISSED"})
+
+
+def _finding_status(finding: RawFinding) -> str:
+    """Extract the scanner's finding status from the evidence JSON blob.
+
+    Both collectors write ``{"status": "<code>"}`` into ``evidence``. Anything
+    unparseable yields an empty string, which is treated as live (not resolved).
+    """
+    try:
+        parsed = json.loads(finding.evidence)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    status = parsed.get("status")
+    return status.upper() if isinstance(status, str) else ""
+
+
+def _dedupe_key(finding: RawFinding) -> tuple[int, int, int]:
+    """Sort key selecting the best finding among duplicates of one CVE.
+
+    Lower sorts first (wins). Precedence:
+
+    1. **Live before resolved.** AWS Inspector emits one finding per vulnerable
+       package, so a CVE can be CLOSED on one package and still ACTIVE on
+       another. ``last_seen`` is Inspector's ``updatedAt``, which is stamped
+       when a finding is *closed* — so the closed record is routinely the newer
+       one. Ranking on recency alone would report a live vulnerability as
+       closed.
+    2. **Higher severity before lower.**
+    3. **Newer before older.**
+    """
+    return (
+        1 if _finding_status(finding) in _RESOLVED_STATUSES else 0,
+        _SEVERITY_ORDER.get(finding.severity, 99),
+        -finding.last_seen_ms,
+    )
+
+
+def _dedupe_by_cve(findings: list[RawFinding]) -> tuple[list[RawFinding], int]:
+    """Collapse findings to one per cve_id. Returns (kept, dropped_count).
+
+    Cortex rejects an asset carrying the same ``vulnerability_id`` twice with
+    HTTP 422, so this must run before the payload is built.
+    """
+    best: dict[str, RawFinding] = {}
+    dropped = 0
+    for f in findings:
+        incumbent = best.get(f.cve_id)
+        if incumbent is None:
+            best[f.cve_id] = f
+            continue
+        dropped += 1
+        if _dedupe_key(f) < _dedupe_key(incumbent):
+            best[f.cve_id] = f
+    return list(best.values()), dropped
+
 
 def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool = False) -> list[dict]:
     """Normalise a list of RawFinding objects into Cortex BYOS batch payloads.
@@ -47,6 +108,13 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
       old assets are included but their last_seen (and every vuln last_seen
       that is also old) is clamped to the current import time, and the tag
       ``over30day:true`` is added to the asset's ``origin_tags``.
+
+    * **Vuln-level — dedup** — Cortex rejects an asset that lists the same
+      ``vulnerability_id`` twice (HTTP 422), and scanners legitimately return
+      several findings for one CVE (AWS Inspector emits one per vulnerable
+      package). Duplicates are collapsed to a single entry, keeping the finding
+      with a live status over a resolved one (CLOSED/SUPPRESSED), then the
+      higher severity, then the more recent last_seen.
 
     * **Vuln-level — no drop** — all vulnerabilities for a qualifying asset
       are always included regardless of their individual last_seen.  If an
@@ -103,8 +171,18 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
     # ---- Step 3: build asset payloads; clamp any old vuln timestamps ----------
     assets: list[dict] = []
     total_clamped_assets = 0
+    total_duplicate_vulns = 0
+    assets_with_duplicates = 0
 
     for asset_id, asset_findings in included.items():
+        # Collapse duplicate CVEs first: Cortex rejects an asset that carries the
+        # same vulnerability_id twice, and duplicates must not consume slots in
+        # the per-asset vuln cap applied below.
+        asset_findings, duplicates_dropped = _dedupe_by_cve(asset_findings)
+        if duplicates_dropped:
+            total_duplicate_vulns += duplicates_dropped
+            assets_with_duplicates += 1
+
         # Sort: severity ascending (CRITICAL first), then last_seen descending (most recent first)
         asset_findings = sorted(
             asset_findings,
@@ -158,6 +236,13 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
             "last_seen": asset_last_seen_out,
             "vulnerabilities": vulnerabilities,
         })
+
+    if total_duplicate_vulns:
+        logger.info(
+            "Collapsed %d duplicate vulnerability_id(s) across %d asset(s); "
+            "kept the live finding over any resolved one for the same CVE.",
+            total_duplicate_vulns, assets_with_duplicates,
+        )
 
     if total_clamped_assets:
         logger.info(
