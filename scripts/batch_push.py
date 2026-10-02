@@ -555,14 +555,14 @@ def main() -> None:
     parser.add_argument(
         "--resource-type",
         default=None,
-        choices=["lambda", "ecr", "ec2"],
+        choices=["lambda", "ecr", "ec2", "vm", "function", "scaleset", "k8s"],
         metavar="TYPE",
         help=(
-            "Restrict the import to a single AWS resource type after collection. "
-            "Valid values: lambda, ecr, ec2. "
-            "Example: --resource-type lambda imports only Lambda function findings; "
-            "--resource-type ecr imports only ECR container image findings. "
-            "AWS only. When omitted all resource types are imported."
+            "Restrict the import to a single resource type after collection. "
+            "AWS: lambda, ecr, ec2. Azure: vm, function, scaleset, k8s. "
+            "Example: --source azure --resource-type function imports only "
+            "function app findings; --resource-type ecr imports only ECR "
+            "container image findings. When omitted all resource types are imported."
         ),
     )
     parser.add_argument(
@@ -816,19 +816,29 @@ def main() -> None:
 
         # --resource-type / --images-only filtering
         _RESOURCE_TYPE_TAG = {
-            "lambda": "resource_type:lambda_function",
-            "ecr":    "resource_type:ecr_container_image",
-            "ec2":    "resource_type:ec2_instance",
+            # AWS (Inspector2)
+            "lambda":   ("aws",   "resource_type:lambda_function"),
+            "ecr":      ("aws",   "resource_type:ecr_container_image"),
+            "ec2":      ("aws",   "resource_type:ec2_instance"),
+            # Azure (Defender / MDVM)
+            "vm":       ("azure", "resource_type:virtual_machine"),
+            "function": ("azure", "resource_type:function_app"),
+            "scaleset": ("azure", "resource_type:vm_scale_set"),
+            "k8s":      ("azure", "resource_type:k8s_container"),
         }
         resource_type_filter = args.resource_type
         if args.images_only and not resource_type_filter:
             resource_type_filter = "ecr"
 
         if resource_type_filter:
-            if args.source != "aws":
-                logger.warning("--resource-type is only supported with --source aws; flag ignored.")
+            expected_source, tag = _RESOURCE_TYPE_TAG[resource_type_filter]
+            if args.source != expected_source:
+                logger.warning(
+                    "--resource-type %s applies to --source %s, but --source %s "
+                    "was given; flag ignored.",
+                    resource_type_filter, expected_source, args.source,
+                )
             else:
-                tag = _RESOURCE_TYPE_TAG[resource_type_filter]
                 before = len(findings)
                 findings = [f for f in findings if tag in f.tags]
                 dropped = before - len(findings)
@@ -839,7 +849,7 @@ def main() -> None:
                 if not findings:
                     logger.warning(
                         "No %s findings found — nothing to import. "
-                        "Check that Inspector2 is scanning this resource type.",
+                        "Check that the scanner is covering this resource type.",
                         resource_type_filter,
                     )
                     sys.exit(0)

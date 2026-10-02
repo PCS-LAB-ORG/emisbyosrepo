@@ -24,12 +24,56 @@ logging.getLogger("azure.identity").setLevel(logging.WARNING)
 logging.getLogger("azure.mgmt").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+# Microsoft Defender Vulnerability Management (MDVM) publishes vulnerabilities as
+# one assessment *per software package*, under microsoft.security/assessments —
+# NOT under .../subassessments, which is the legacy (Qualys/BYOL) shape and is
+# empty on MDVM-enabled subscriptions. The CVEs live in a JSON-encoded string at
+# properties.additionalData.CvesDetails, so one row expands into many findings.
+#
+# No resource-type restriction here on purpose: the collector gathers every
+# resource type Defender assesses (VMs, scale sets, App Service / function apps,
+# K8s containers, ...). Narrowing to a subset is a caller concern — see
+# batch_push.py's --resource-type flag, which filters on the resource_type: tag.
 _BASE_QUERY = (
     "securityresources "
-    "| where type == 'microsoft.security/assessments/subassessments' "
-    "| where properties.id != '' "
+    "| where type == 'microsoft.security/assessments' "
+    "| where isnotempty(tostring(properties.additionalData.CvesDetails)) "
     "| project id, name, properties"
 )
+
+# Azure Defender status.code -> the ACTIVE/CLOSED vocabulary Cortex expects.
+# NotApplicable means Defender could not assess the resource; it asserts neither
+# presence nor absence of a vulnerability, so those rows are dropped rather than
+# guessed either way. In practice Defender strips CvesDetails from Healthy and
+# NotApplicable assessments, so only Unhealthy rows carry CVEs at all.
+_STATUS_MAP = {
+    "UNHEALTHY": "ACTIVE",
+    "HEALTHY": "CLOSED",
+}
+_STATUS_SKIP = {"NOTAPPLICABLE"}
+
+# resourceDetails.ResourceType -> resource_type: tag value. Mirrors the AWS
+# collector's tagging so --resource-type works the same way for both clouds.
+_RESOURCE_TYPE_TAGS = {
+    "microsoft.compute/virtualmachines":         "virtual_machine",
+    "microsoft.compute/virtualmachinescalesets": "vm_scale_set",
+    "microsoft.web/sites/functionapp":           "function_app",
+    "microsoft.web/sites":                       "app_service",
+    "microsoft.containerregistry/registries":    "container_registry",
+    "k8s-container":                             "k8s_container",
+}
+
+
+def _resource_type_tag(resource_type: str) -> str:
+    """Map an Azure resourceDetails.ResourceType to a stable resource_type: tag."""
+    key = (resource_type or "").lower()
+    if key in _RESOURCE_TYPE_TAGS:
+        return _RESOURCE_TYPE_TAGS[key]
+    if not key:
+        return "unknown"
+    # Unmapped type: derive a readable slug from the last path segment so the
+    # finding is still filterable (e.g. Microsoft.Sql/servers -> servers).
+    return re.sub(r"[^a-z0-9]+", "_", key.split("/")[-1]).strip("_") or "unknown"
 
 # Matches: /subscriptions/{sub}/resourceGroups/{rg}/providers/{ns}/{type}/{name}/...
 _ARM_RE = re.compile(
@@ -166,7 +210,8 @@ def _collect_with_retry(
         logger.warning("Diagnostic query failed: %s", diag_exc)
 
     findings: list[RawFinding] = []
-    skipped_no_cve = 0
+    skipped_rows = 0
+    skipped_notapplicable = 0
     raw_total = 0
     skip_token = None
     while True:
@@ -201,20 +246,24 @@ def _collect_with_retry(
             raw_total += 1
             parsed = _parse(row)
             if parsed:
-                findings.append(parsed)
-            else:
-                skipped_no_cve += 1
-                # Log why this row was skipped (first 5 skips only to avoid spam)
-                if skipped_no_cve <= 5:
-                    props = row.get("properties", {})
-                    logger.warning(
-                        "Skipped row %d (no CVE found) - displayName: '%s', "
-                        "properties.id: '%s', additionalData keys: %s",
-                        raw_total,
-                        props.get("displayName", "N/A"),
-                        props.get("id", "N/A"),
-                        list(props.get("additionalData", {}).keys())
-                    )
+                findings.extend(parsed)
+                continue
+            skipped_rows += 1
+            props = row.get("properties", {}) or {}
+            status_code = str((props.get("status") or {}).get("code", "")).upper()
+            if status_code in _STATUS_SKIP:
+                skipped_notapplicable += 1
+                continue
+            # Log why this row yielded nothing (first 5 only, to avoid spam)
+            if skipped_rows - skipped_notapplicable <= 5:
+                logger.warning(
+                    "Skipped row %d (no CVEs extracted) - displayName: '%s', "
+                    "status: '%s', additionalData keys: %s",
+                    raw_total,
+                    props.get("displayName", "N/A"),
+                    status_code or "N/A",
+                    list((props.get("additionalData") or {}).keys()),
+                )
         skip_token = getattr(result, "skip_token", None)
         if not skip_token:
             break
@@ -223,136 +272,154 @@ def _collect_with_retry(
         if management_groups
         else f"{len(subscriptions)} subscription(s)"
     )
+    if skipped_notapplicable:
+        logger.info(
+            "Skipped %d assessment(s) with status NotApplicable (Defender could not "
+            "assess the resource — no vulnerability asserted either way).",
+            skipped_notapplicable,
+        )
     logger.info(
-        "Azure Defender: %d raw findings — %d kept, %d skipped (no CVE)  "
-        "[mode=%s, scope=%s]",
-        raw_total, len(findings), skipped_no_cve, mode, scope_desc,
+        "Azure Defender: %d assessment row(s) → %d finding(s) across %d asset(s); "
+        "%d row(s) yielded no CVEs  [mode=%s, scope=%s]",
+        raw_total, len(findings), len({f.asset_id for f in findings}),
+        skipped_rows, mode, scope_desc,
     )
+    if findings:
+        by_type: dict[str, int] = {}
+        for f in findings:
+            tag = next((t[len("resource_type:"):] for t in f.tags
+                        if t.startswith("resource_type:")), "unknown")
+            by_type[tag] = by_type.get(tag, 0) + 1
+        logger.info("Findings by resource type:")
+        for tag, count in sorted(by_type.items(), key=lambda kv: -kv[1]):
+            logger.info("  resource_type:%-22s %d finding(s)", tag, count)
     return findings
 
 
-def _parse(row: dict) -> RawFinding | None:
-    props = row.get("properties", {})
-    additional = props.get("additionalData", {})
+def _parse_timestamp(status: dict) -> int | None:
+    """Milliseconds for the most recent evaluation of this assessment.
 
-    # Extract CVE ID from various possible locations
-    cve_id = ""
-    cve_source = ""
+    MDVM assessments carry no ``properties.timeGenerated`` — the previous code
+    read that field, so every finding silently fell back to the import time and
+    real finding age was lost. Prefer statusChangeDate, then firstEvaluationDate.
+    """
+    for key in ("statusChangeDate", "firstEvaluationDate"):
+        value = status.get(key)
+        if not value:
+            continue
+        try:
+            parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return int(parsed.timestamp() * 1000)
+    return None
 
-    # Option 1: additionalData.cve (array of CVE objects)
-    cve_list = additional.get("cve", [])
-    if cve_list and isinstance(cve_list, list) and len(cve_list) > 0:
-        if isinstance(cve_list[0], dict):
-            cve_id = cve_list[0].get("id", "") or cve_list[0].get("cve", "")
-            if cve_id:
-                cve_source = "additionalData.cve[]"
-        elif isinstance(cve_list[0], str):
-            cve_id = cve_list[0]
-            if cve_id:
-                cve_source = "additionalData.cve[]"
 
-    # Option 2: additionalData.vulnerabilityId
-    if not cve_id:
-        cve_id = additional.get("vulnerabilityId", "")
-        if cve_id:
-            cve_source = "additionalData.vulnerabilityId"
-
-    # Option 3: Extract from displayName (e.g., "CVE-2024-12345: Some description")
-    if not cve_id:
-        display_name = props.get("displayName", "")
-        if display_name and "CVE-" in display_name:
-            match = re.search(r'(CVE-\d{4}-\d+)', display_name, re.IGNORECASE)
-            if match:
-                cve_id = match.group(1).upper()
-                cve_source = "displayName (regex)"
-
-    # Option 4: Fall back to properties.id (legacy behavior)
-    if not cve_id:
-        cve_id = props.get("id", "")
-        if cve_id:
-            cve_source = "properties.id"
-
-    if not cve_id:
-        return None
-
-    # Log first 5 successful CVE extractions to show which method is working
-    if not hasattr(_parse, "_log_count"):
-        _parse._log_count = 0
-    if _parse._log_count < 5:
-        _parse._log_count += 1
-        logger.info("✓ Extracted CVE '%s' from %s", cve_id, cve_source)
-
-    arm_id: str = row.get("id", "")
-    arm = _parse_arm_id(arm_id)
-    subscription_id = arm.get("sub", "")
-    resource_group = arm.get("rg", "")
-    provider_ns = arm.get("ns", "")       # e.g. Microsoft.ContainerRegistry
-    resource_type = arm.get("rtype", "")  # e.g. registries
-    resource_name_arm = arm.get("rname", "")
-
-    resource_details = props.get("resourceDetails", {})
-    resource_name = resource_details.get("resourceName") or resource_name_arm or arm_id
-    resource_source = resource_details.get("source", "")  # Azure, OnPremise, etc.
-
-    # Container image metadata (present when the finding is on a registry image)
-    registry = additional.get("registry", "")
-    repo = additional.get("repositoryName", "")
-    image_tag = additional.get("imageTag", "")
-    image_digest = additional.get("imageDigest", "")
-    os_name = additional.get("osDetails") or additional.get("platform") or None
-
-    # FQDN: full ACR image reference when registry metadata is available
-    fqdn: list[str] = []
-    if registry and repo:
-        ref = f"{registry}/{repo}"
-        if image_tag:
-            ref = f"{ref}:{image_tag}"
-        fqdn = [ref]
-
-    # Cloud metadata tags
-    cloud_meta: list[str] = [
-        "cloud:azure",
-        f"azure_subscription:{subscription_id}",
-        f"azure_resource_group:{resource_group}",
-        f"azure_provider:{provider_ns}",
-        f"azure_resource_type:{resource_type}",
-        f"azure_resource_name:{resource_name_arm}",
-        f"source:{resource_source}",
-    ]
-    if registry:
-        cloud_meta.append(f"registry:{registry}")
-    if repo:
-        cloud_meta.append(f"repository:{repo}")
-    if image_tag:
-        cloud_meta.append(f"image_tag:{image_tag}")
-    if image_digest:
-        cloud_meta.append(f"image_digest:{image_digest}")
-
-    severity = (props.get("severity") or {}).get("severity", "Medium").upper()
-    finding_status = (props.get("status") or {}).get("code", "UNKNOWN")
-    evidence = json.dumps({"status": finding_status})
-    raw_output = str(additional.get("cvss", ""))[:2000]
-    time_generated = props.get("timeGenerated", "")
+def _parse_cves(additional: dict) -> list[dict]:
+    """Decode additionalData.CvesDetails, which Defender stores as a JSON string."""
+    blob = additional.get("CvesDetails")
+    if not blob:
+        return []
+    if isinstance(blob, list):          # already decoded by the SDK
+        return [c for c in blob if isinstance(c, dict)]
     try:
-        dt = datetime.datetime.fromisoformat(time_generated.replace("Z", "+00:00"))
-        last_seen_ms = int(dt.timestamp() * 1000)
-    except Exception:
+        parsed = json.loads(blob)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [c for c in parsed if isinstance(c, dict)]
+
+
+def _parse(row: dict) -> list[RawFinding]:
+    """Expand one MDVM assessment row into one RawFinding per CVE."""
+    props = row.get("properties", {}) or {}
+    additional = props.get("additionalData", {}) or {}
+    status = props.get("status", {}) or {}
+    metadata = props.get("metadata", {}) or {}
+    details = props.get("resourceDetails", {}) or {}
+
+    raw_status = str(status.get("code", "")).upper()
+    if raw_status in _STATUS_SKIP:
+        return []
+    mapped_status = _STATUS_MAP.get(raw_status, raw_status or "UNKNOWN")
+
+    cves = _parse_cves(additional)
+    if not cves:
+        return []
+
+    # asset_id must identify the *resource*, not the per-package assessment.
+    # row["id"] is the assessment ARM id and is unique per software package, so
+    # using it fragmented one VM into hundreds of single-vuln Cortex assets.
+    asset_id = (
+        details.get("NativeResourceId")
+        or details.get("ResourceId")
+        or details.get("Id")
+        or row.get("id", "")
+    )
+    if not asset_id:
+        return []
+
+    arm = _parse_arm_id(asset_id)
+    resource_type = str(details.get("ResourceType") or "")
+    software = str(additional.get("SoftwareName") or "")
+    asset_name = details.get("ResourceName") or arm.get("rname", "") or asset_id
+
+    tags: list[str] = [
+        "cloud:azure",
+        f"azure_subscription:{arm.get('sub', '')}",
+        f"azure_resource_group:{arm.get('rg', '')}",
+        f"azure_provider:{arm.get('ns', '')}",
+        f"azure_resource_type:{arm.get('rtype', '')}",
+        f"azure_resource_name:{arm.get('rname', '')}",
+        f"source:{details.get('Source', '')}",
+        f"resource_type:{_resource_type_tag(resource_type)}",
+        f"status:{mapped_status}",
+    ]
+    if software:
+        tags.append(f"software:{software}")
+    package_type = additional.get("PackageType")
+    if package_type:
+        tags.append(f"package_type:{package_type}")
+
+    last_seen_ms = _parse_timestamp(status)
+    if last_seen_ms is None:
         last_seen_ms = int(time.time() * 1000)
 
-    return RawFinding(
-        asset_id=arm_id,
-        asset_name=resource_name,
-        ipv4=[],
-        ipv6=[],
-        fqdn=fqdn,
-        mac_address=None,
-        os_name=os_name,
-        tags=cloud_meta,
-        last_seen_ms=last_seen_ms,
-        cve_id=cve_id,
-        severity=severity,
-        description=props.get("description", ""),
-        evidence=evidence,
-        raw_output=raw_output,
-        source="azure_defender",
-    )
+    fallback_severity = str(metadata.get("severity") or "MEDIUM").upper()
+    max_cvss = additional.get("MaxCvssScore") or ""
+    detected = additional.get("DetectedSoftwareVersions") or ""
+    description = str(metadata.get("description") or props.get("displayName") or "")
+
+    findings: list[RawFinding] = []
+    for cve in cves:
+        cve_id = str(cve.get("CveId") or "").strip()
+        if not cve_id:
+            continue
+        severity = str(cve.get("Severity") or "").upper() or fallback_severity
+        fixed_version = str(cve.get("FixedVersion") or "")
+        evidence = json.dumps({
+            "status": mapped_status,
+            "azureStatus": status.get("code", ""),
+            "fixStatus": cve.get("FixStatus", ""),
+            "fixedVersion": fixed_version,
+        })
+        raw_output = f"score:{max_cvss} | {software or 'unknown package'} {detected}".strip()
+        findings.append(RawFinding(
+            asset_id=asset_id,
+            asset_name=asset_name,
+            ipv4=[],
+            ipv6=[],
+            fqdn=[],
+            mac_address=None,
+            os_name=None,
+            tags=tags,
+            last_seen_ms=last_seen_ms,
+            cve_id=cve_id,
+            severity=severity,
+            description=description,
+            evidence=evidence,
+            raw_output=raw_output[:2000],
+            source="azure_defender",
+        ))
+    return findings
