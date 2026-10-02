@@ -218,6 +218,40 @@ def test_healthy_maps_to_closed():
     assert json.loads(findings[0].evidence)["status"] == "CLOSED"
 
 
+def test_evidence_is_exactly_status_active_or_closed():
+    """Cortex consumes evidence as {"status": "ACTIVE"|"CLOSED"} — no other keys."""
+    findings, _ = _run([_row(status_code="Unhealthy")])
+    assert list(json.loads(findings[0].evidence)) == ["status"]
+
+
+def test_evidence_never_contains_an_azure_status_word():
+    """Azure vocabulary must be translated, not passed through."""
+    findings, _ = _run([_row(status_code="Unhealthy")])
+    assert "Unhealthy" not in findings[0].evidence
+    assert json.loads(findings[0].evidence) == {"status": "ACTIVE"}
+
+
+def test_unrecognised_status_defaults_to_active():
+    """An unmapped Defender status must not be reported as resolved."""
+    findings, _ = _run([_row(status_code="SomeNewStatus")])
+    assert json.loads(findings[0].evidence) == {"status": "ACTIVE"}
+
+
+def test_native_azure_status_preserved_in_tags():
+    findings, _ = _run([_row(status_code="Healthy")])
+    assert "azure_status:Healthy" in findings[0].tags
+
+
+def test_fix_information_preserved_in_raw_output():
+    """fixStatus/fixedVersion leave evidence but must not be lost."""
+    findings, _ = _run([_row(
+        max_cvss="8.9", software="urllib3",
+        cves_details=_cves(("CVE-A", "High", "2.7.0")),
+    )])
+    assert "2.7.0" in findings[0].raw_output
+    assert "FixAvailable" in findings[0].raw_output
+
+
 def test_notapplicable_rows_are_skipped():
     """NotApplicable means Defender could not assess — it asserts no vulnerability."""
     findings, _ = _run([_row(status_code="NotApplicable")])
@@ -288,11 +322,10 @@ def test_raw_output_contains_cvss_and_software():
     assert "libc-bin_for_linux" in findings[0].raw_output
 
 
-def test_evidence_carries_fix_information():
+def test_evidence_carries_only_status():
     findings, _ = _run([_row(cves_details=_cves(("CVE-A", "High", "2.7.0")))])
     ev = json.loads(findings[0].evidence)
-    assert ev["status"] == "ACTIVE"
-    assert ev["fixedVersion"] == "2.7.0"
+    assert ev == {"status": "ACTIVE"}
 
 
 # --- query shape ------------------------------------------------------------

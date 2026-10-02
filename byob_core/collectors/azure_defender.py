@@ -42,6 +42,11 @@ _BASE_QUERY = (
 )
 
 # Azure Defender status.code -> the ACTIVE/CLOSED vocabulary Cortex expects.
+# Cortex consumes evidence as {"status": "ACTIVE"|"CLOSED"} — exactly two
+# values. Only Healthy means the vulnerability is gone; anything unrecognised
+# falls through to ACTIVE so a live finding is never reported as resolved. The
+# native Defender value is kept verbatim in the azure_status: tag.
+#
 # NotApplicable means Defender could not assess the resource; it asserts neither
 # presence nor absence of a vulnerability, so those rows are dropped rather than
 # guessed either way. In practice Defender strips CvesDetails from Healthy and
@@ -342,7 +347,9 @@ def _parse(row: dict) -> list[RawFinding]:
     raw_status = str(status.get("code", "")).upper()
     if raw_status in _STATUS_SKIP:
         return []
-    mapped_status = _STATUS_MAP.get(raw_status, raw_status or "UNKNOWN")
+    # Unrecognised statuses fall through to ACTIVE — never report a live finding
+    # as resolved on the strength of a value we do not know.
+    mapped_status = _STATUS_MAP.get(raw_status, "ACTIVE")
 
     cves = _parse_cves(additional)
     if not cves:
@@ -376,6 +383,9 @@ def _parse(row: dict) -> list[RawFinding]:
         f"resource_type:{_resource_type_tag(resource_type)}",
         f"status:{mapped_status}",
     ]
+    native_status = str(status.get("code", "") or "")
+    if native_status:
+        tags.append(f"azure_status:{native_status}")
     if software:
         tags.append(f"software:{software}")
     package_type = additional.get("PackageType")
@@ -397,14 +407,19 @@ def _parse(row: dict) -> list[RawFinding]:
         if not cve_id:
             continue
         severity = str(cve.get("Severity") or "").upper() or fallback_severity
+        # Cortex consumes evidence as exactly {"status": "ACTIVE"|"CLOSED"}.
+        # Fix details live in raw_output so nothing is lost.
+        evidence = json.dumps({"status": mapped_status})
+        fix_status = str(cve.get("FixStatus") or "")
         fixed_version = str(cve.get("FixedVersion") or "")
-        evidence = json.dumps({
-            "status": mapped_status,
-            "azureStatus": status.get("code", ""),
-            "fixStatus": cve.get("FixStatus", ""),
-            "fixedVersion": fixed_version,
-        })
-        raw_output = f"score:{max_cvss} | {software or 'unknown package'} {detected}".strip()
+        parts = [f"score:{max_cvss}", software or "unknown package"]
+        if detected:
+            parts.append(str(detected))
+        if fix_status:
+            parts.append(fix_status)
+        if fixed_version:
+            parts.append(f"fixed in {fixed_version}")
+        raw_output = " | ".join(p for p in parts if p)
         findings.append(RawFinding(
             asset_id=asset_id,
             asset_name=asset_name,

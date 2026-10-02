@@ -292,19 +292,34 @@ def test_normalize_dedupe_prefers_newest_when_statuses_match():
     assert vulns[0]["last_seen"] == now - 1000
 
 
-def test_normalize_dedupe_prefers_active_over_suppressed():
-    """SUPPRESSED is not a live risk — an ACTIVE copy of the same CVE wins."""
+def test_normalize_dedupe_prefers_active_over_closed_regardless_of_order():
+    """Precedence must not depend on which copy the scanner returned first."""
     now = _now_ms()
     findings = [
         _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
-                      last_seen_ms=now - 1000, evidence=_status("SUPPRESSED")),
-        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
                       last_seen_ms=now - 9000, evidence=_status("ACTIVE")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 1000, evidence=_status("CLOSED")),
     ]
     batches = normalize(findings, "aws_inspector")
     vulns = batches[0]["assets"][0]["vulnerabilities"]
     assert len(vulns) == 1
     assert json.loads(vulns[0]["evidence"])["status"] == "ACTIVE"
+
+
+def test_normalize_dedupe_treats_unexpected_status_as_live():
+    """Only CLOSED is resolved; any other value must be treated as a live risk."""
+    now = _now_ms()
+    findings = [
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 1000, evidence=_status("CLOSED")),
+        _make_finding(asset_id="i-abc", cve_id="CVE-2024-0001",
+                      last_seen_ms=now - 9000, evidence=_status("SUPPRESSED")),
+    ]
+    batches = normalize(findings, "aws_inspector")
+    vulns = batches[0]["assets"][0]["vulnerabilities"]
+    assert len(vulns) == 1
+    assert json.loads(vulns[0]["evidence"])["status"] == "SUPPRESSED"
 
 
 def test_normalize_dedupe_prefers_highest_severity_within_same_status():

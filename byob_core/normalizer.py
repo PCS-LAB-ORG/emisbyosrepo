@@ -35,10 +35,12 @@ _SEVERITY_ORDER: dict[str, int] = {
     "UNTRIAGED": 5,
 }
 
-# Finding statuses that no longer represent a live risk. When the same CVE
-# appears more than once on an asset, a finding in one of these states loses to
-# any finding that is not.
-_RESOLVED_STATUSES = frozenset({"CLOSED", "RESOLVED", "SUPPRESSED", "DISMISSED"})
+# Collectors normalise every scanner's finding status to Cortex's two-value
+# vocabulary before the normalizer sees it: evidence is {"status": "ACTIVE"} or
+# {"status": "CLOSED"}. CLOSED is the only resolved state; anything else —
+# including a missing or unparseable status — is treated as live so a real
+# vulnerability is never dropped in favour of a resolved duplicate.
+_RESOLVED_STATUSES = frozenset({"CLOSED"})
 
 
 def _finding_status(finding: RawFinding) -> str:

@@ -180,6 +180,65 @@ def test_collect_returns_empty_on_no_findings():
 # ---------------------------------------------------------------------------
 # Scheduled-mode filter criteria
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# evidence contract: {"status": "ACTIVE"|"CLOSED"} and nothing else
+# ---------------------------------------------------------------------------
+def _evidence_of(finding: RawFinding) -> dict:
+    import json
+    return json.loads(finding.evidence)
+
+
+def test_evidence_is_exactly_status_active_or_closed():
+    """Cortex consumes evidence as {"status": "ACTIVE"|"CLOSED"} — no other keys."""
+    f = _make_ec2_finding()
+    f["status"] = "ACTIVE"
+    mock_client, _ = _mock_paginator([f])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert list(_evidence_of(findings[0])) == ["status"]
+    assert _evidence_of(findings[0])["status"] == "ACTIVE"
+
+
+def test_evidence_active_status_maps_to_active():
+    f = _make_ec2_finding()
+    f["status"] = "ACTIVE"
+    mock_client, _ = _mock_paginator([f])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert _evidence_of(findings[0]) == {"status": "ACTIVE"}
+
+
+def test_evidence_closed_status_maps_to_closed():
+    f = _make_ec2_finding()
+    f["status"] = "CLOSED"
+    mock_client, _ = _mock_paginator([f])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert _evidence_of(findings[0]) == {"status": "CLOSED"}
+
+
+def test_evidence_never_contains_unknown():
+    """A finding with no status must still yield one of the two valid values."""
+    f = _make_ec2_finding()
+    f.pop("status", None)
+    mock_client, _ = _mock_paginator([f])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    status = _evidence_of(findings[0])["status"]
+    assert status in ("ACTIVE", "CLOSED")
+    assert status == "ACTIVE", "a missing status must not be reported as resolved"
+
+
+def test_native_status_preserved_in_tags():
+    """The raw Inspector status stays available as a tag even after mapping."""
+    f = _make_ec2_finding()
+    f["status"] = "CLOSED"
+    mock_client, _ = _mock_paginator([f])
+    with patch("boto3.client", return_value=mock_client):
+        findings = collect(mode="scheduled")
+    assert "status:CLOSED" in findings[0].tags
+
+
 def test_scheduled_filter_uses_status_and_severity_defaults():
     """Default filters: status in ACTIVE/CLOSED, severity in MEDIUM/HIGH/CRITICAL/LOW.
 

@@ -61,6 +61,21 @@ _DEFAULT_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 #                              Ignored when INSPECTOR2_COVERAGE_FILTER=false.
 # ---------------------------------------------------------------------------
 _VALID_STATUSES = {"ACTIVE", "SUPPRESSED", "CLOSED"}
+
+# Cortex consumes evidence as {"status": "ACTIVE"|"CLOSED"} — exactly two values.
+# Inspector's CLOSED means the finding is no longer present; everything else
+# (ACTIVE, SUPPRESSED, or a missing status) is reported as live, so a muted or
+# unlabelled finding is never mistaken for a fixed one. The native Inspector
+# value is kept verbatim in the status: tag.
+_CORTEX_RESOLVED_STATUSES = {"CLOSED"}
+
+
+def _cortex_status(inspector_status: str) -> str:
+    """Map an Inspector2 finding status to Cortex's ACTIVE/CLOSED vocabulary."""
+    if (inspector_status or "").upper() in _CORTEX_RESOLVED_STATUSES:
+        return "CLOSED"
+    return "ACTIVE"
+
 _VALID_SEVERITIES = {"INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNTRIAGED"}
 
 # Lower index = higher priority; UNTRIAGED sits between LOW and INFORMATIONAL
@@ -536,7 +551,7 @@ def _parse(raw: dict) -> RawFinding | None:
     score = raw.get("inspectorScore", 0)
     remediation = (raw.get("remediation") or {}).get("recommendation", {}).get("text", "")
     raw_output = f"score:{score} | {remediation}"[:2000]
-    evidence = json.dumps({"status": finding_status}) if finding_status else json.dumps({"status": "UNKNOWN"})
+    evidence = json.dumps({"status": _cortex_status(finding_status)})
     # ECR uses ecr_asset_id (registry/repo@digest); all others use resource_id.
     final_asset_id = ecr_asset_id if resource_type == "AWS_ECR_CONTAINER_IMAGE" else resource_id
     return RawFinding(
