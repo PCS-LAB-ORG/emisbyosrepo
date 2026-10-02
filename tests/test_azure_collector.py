@@ -7,6 +7,7 @@ string at `properties.additionalData.CvesDetails` — so one row expands into ma
 findings.
 """
 import json
+import logging
 import time
 from unittest.mock import patch, MagicMock
 
@@ -355,6 +356,37 @@ def test_event_mode_filters_by_resource_id():
     q = next(c.args[0].query for c in client.resources.call_args_list
              if "CvesDetails" in c.args[0].query)
     assert VM_RESOURCE_ID in q
+
+
+# --- log volume -------------------------------------------------------------
+
+def test_raw_rows_are_not_dumped_at_info_level(caplog):
+    """The full Resource Graph row is thousands of chars — too noisy for INFO."""
+    with caplog.at_level(logging.INFO, logger="byob_core.collectors.azure_defender"):
+        _run([_row(), _row(assessment_guid="bbbb"), _row(assessment_guid="cccc")])
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert messages, "collector should still log a summary at INFO"
+    assert not any("DEFENDER API RESPONSE" in m for m in messages)
+    longest = max(len(m) for m in messages)
+    assert longest < 600, f"an INFO line is {longest} chars — raw rows are leaking into INFO"
+
+
+def test_raw_rows_are_available_at_debug_level(caplog):
+    """Kept for diagnosing tenants whose rows have an unexpected shape."""
+    with caplog.at_level(logging.DEBUG, logger="byob_core.collectors.azure_defender"):
+        _run([_row()])
+    debug = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+    assert "NativeResourceId" in debug
+    assert VM_RESOURCE_ID in debug
+
+
+def test_summary_still_reports_counts_at_info(caplog):
+    with caplog.at_level(logging.INFO, logger="byob_core.collectors.azure_defender"):
+        findings, _ = _run([_row(cves_details=_cves(("CVE-A", "High", ""), ("CVE-B", "Low", "")))])
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert len(findings) == 2
+    assert "finding(s)" in text
+    assert "1 assessment row(s)" in text
 
 
 # --- end to end through the normalizer -------------------------------------

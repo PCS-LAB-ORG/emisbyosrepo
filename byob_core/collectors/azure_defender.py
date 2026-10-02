@@ -189,30 +189,37 @@ def _collect_with_retry(
         query = f"{_BASE_QUERY} | where id startswith '{safe_id}'"
 
     # Log the exact query and scope being used
-    logger.info("=" * 80)
-    logger.info("AZURE RESOURCE GRAPH QUERY:")
-    logger.info("Query: %s", query)
-    logger.info("Subscriptions: %s", subscriptions or "None (using management groups)")
-    logger.info("Management Groups: %s", management_groups or "None")
-    logger.info("=" * 80)
+    logger.info(
+        "Azure Resource Graph query [mode=%s, scope=%s]",
+        mode,
+        f"management group(s) {management_groups}" if management_groups
+        else f"{len(subscriptions)} subscription(s)",
+    )
+    logger.debug("Query: %s", query)
+    logger.debug("Subscriptions: %s | Management groups: %s",
+                 subscriptions or "none", management_groups or "none")
 
-    # Diagnostic: check what security resource types exist in scope at all
-    try:
-        diag_req = QueryRequest(
-            subscriptions=subscriptions or None,
-            management_groups=management_groups or None,
-            query="securityresources | summarize count() by type | order by count_ desc",
-        )
-        diag_result = client.resources(diag_req)
-        diag_rows = diag_result.data if diag_result.data else []
-        if diag_rows:
-            logger.info("Security resource types in scope:")
-            for r in diag_rows:
-                logger.info("  type=%-60s  count=%s", r.get("type", "?"), r.get("count_", "?"))
-        else:
-            logger.warning("Diagnostic query returned 0 rows — no securityresources found in this scope at all.")
-    except Exception as diag_exc:
-        logger.warning("Diagnostic query failed: %s", diag_exc)
+    # Diagnostic: what security resource types exist in scope at all. Only worth
+    # the extra round-trip when debugging an empty or unexpected result.
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            diag_req = QueryRequest(
+                subscriptions=subscriptions or None,
+                management_groups=management_groups or None,
+                query="securityresources | summarize count() by type | order by count_ desc",
+            )
+            diag_result = client.resources(diag_req)
+            diag_rows = diag_result.data if diag_result.data else []
+            if diag_rows:
+                logger.debug("Security resource types in scope:")
+                for r in diag_rows:
+                    logger.debug("  type=%-60s count=%s", r.get("type", "?"), r.get("count_", "?"))
+            else:
+                logger.warning(
+                    "Diagnostic query returned 0 rows — no securityresources in this scope at all."
+                )
+        except Exception as diag_exc:
+            logger.warning("Diagnostic query failed: %s", diag_exc)
 
     findings: list[RawFinding] = []
     skipped_rows = 0
@@ -233,20 +240,20 @@ def _collect_with_retry(
         logger.info("Azure Resource Graph page: %d rows returned", len(rows))
 
         if not rows:
-            logger.info("Empty page — raw result dump: total_records=%s, skip_token=%s, data=%s",
-                        getattr(result, "total_records", "?"),
-                        getattr(result, "skip_token", "?"),
-                        str(result.data)[:500])
+            logger.warning(
+                "Empty page from Resource Graph — total_records=%s, skip_token=%s. "
+                "If this is the first page, no CVE-bearing assessments exist in scope.",
+                getattr(result, "total_records", "?"),
+                getattr(result, "skip_token", "?"),
+            )
 
-        # Show first few rows in detail for debugging
-        if rows and raw_total == 0:
-            logger.info("=" * 80)
-            logger.info("DEFENDER API RESPONSE - First 3 rows:")
-            logger.info("=" * 80)
+        # Full rows are several KB each — DEBUG only. Enable with
+        # logging.getLogger("byob_core.collectors.azure_defender").setLevel(DEBUG)
+        # to inspect the raw shape when a tenant returns unexpected fields.
+        if rows and raw_total == 0 and logger.isEnabledFor(logging.DEBUG):
             for i, row in enumerate(rows[:3], 1):
-                logger.info(f"\n--- Row {i} ---")
-                logger.info(json.dumps(row, indent=2, default=str))
-            logger.info("=" * 80)
+                logger.debug("Raw assessment row %d/%d: %s", i, min(3, len(rows)),
+                             json.dumps(row, indent=2, default=str))
         for row in rows:
             raw_total += 1
             parsed = _parse(row)
