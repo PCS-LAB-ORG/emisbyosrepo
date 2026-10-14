@@ -229,14 +229,15 @@ def test_evidence_never_contains_unknown():
     assert status == "ACTIVE", "a missing status must not be reported as resolved"
 
 
-def test_native_status_preserved_in_tags():
-    """The raw Inspector status stays available as a tag even after mapping."""
+def test_status_not_in_asset_tags():
+    """Finding status is per-vuln (evidence), never an asset tag."""
     f = _make_ec2_finding()
     f["status"] = "CLOSED"
     mock_client, _ = _mock_paginator([f])
     with patch("boto3.client", return_value=mock_client):
         findings = collect(mode="scheduled")
-    assert "status:CLOSED" in findings[0].tags
+    assert not any(t.startswith("status:") for t in findings[0].tags)
+    assert _evidence_of(findings[0]) == {"status": "CLOSED"}
 
 
 def test_scheduled_filter_uses_status_and_severity_defaults():
@@ -540,7 +541,7 @@ def test_coverage_filter_zero_results_does_not_drop_all_findings():
     mock_client, _ = _mock_paginator([finding], covered_ids=[])
     # Patch _active_resource_ids to return empty set (mimics permission failure path)
     with patch("boto3.client", return_value=mock_client), \
-         patch("byob_core.collectors.aws_inspector._active_resource_ids", return_value=set()):
+         patch("byob_core.collectors.aws_inspector._active_resource_ids", return_value={}):
         findings = collect(mode="scheduled")
     # With empty coverage set, filter is bypassed — finding should be kept
     assert len(findings) == 1
@@ -571,12 +572,90 @@ def test_coverage_hours_flag_passed_to_active_resource_ids():
 
     with patch("boto3.client", return_value=mock_client), \
          patch("byob_core.collectors.aws_inspector._active_resource_ids",
-               wraps=lambda client, lookback_hours=720: {resource_id}) as mock_cov:
+               wraps=lambda client, lookback_hours=720: {resource_id: None}) as mock_cov:
         collect(mode="scheduled", coverage_hours=72)
 
     mock_cov.assert_called_once()
     _, kwargs = mock_cov.call_args
     assert kwargs.get("lookback_hours") == 72
+
+
+# ---------------------------------------------------------------------------
+# Asset last_seen = Inspector2 coverage lastScannedAt (not vuln timestamps)
+# ---------------------------------------------------------------------------
+def _coverage_client(findings: list[dict], coverage: list[dict]):
+    findings_pag = MagicMock()
+    findings_pag.paginate.return_value = [{"findings": findings}]
+    coverage_pag = MagicMock()
+    coverage_pag.paginate.return_value = [{"coveredResources": coverage}]
+    client = MagicMock()
+    client.get_paginator.side_effect = (
+        lambda name: findings_pag if name == "list_findings" else coverage_pag
+    )
+    return client
+
+
+def test_asset_last_seen_comes_from_last_scanned_at():
+    """asset_last_seen_ms is the coverage lastScannedAt, not the finding updatedAt."""
+    finding = _make_ec2_finding()  # updatedAt = 2024-01-01
+    scanned = datetime.datetime(2026, 10, 13, 8, 30, tzinfo=datetime.timezone.utc)
+    client = _coverage_client([finding], [{
+        "resourceId": "i-0abc123def456", "resourceType": "AWS_EC2_INSTANCE",
+        "lastScannedAt": scanned,
+    }])
+    with patch("boto3.client", return_value=client):
+        findings = collect(mode="scheduled")
+    assert findings[0].asset_last_seen_ms == int(scanned.timestamp() * 1000)
+    # Vulnerability timestamp is untouched
+    assert findings[0].last_seen_ms == int(finding["updatedAt"].timestamp() * 1000)
+
+
+def test_asset_last_seen_lambda_matches_base_arn():
+    base = "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
+    finding = _make_lambda_finding(arn=f"{base}:$LATEST")
+    scanned = datetime.datetime(2026, 10, 12, tzinfo=datetime.timezone.utc)
+    client = _coverage_client([finding], [{
+        "resourceId": base, "resourceType": "AWS_LAMBDA_FUNCTION", "lastScannedAt": scanned,
+    }])
+    with patch("boto3.client", return_value=client):
+        findings = collect(mode="scheduled")
+    assert findings[0].asset_last_seen_ms == int(scanned.timestamp() * 1000)
+
+
+def test_asset_last_seen_ecr_matches_by_digest():
+    finding = _make_ecr_finding()
+    scanned = datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc)
+    client = _coverage_client([finding], [
+        {"resourceId": "i-unrelated", "resourceType": "AWS_EC2_INSTANCE",
+         "lastScannedAt": scanned},
+        {"resourceId": "sha256:abcd1234", "resourceType": "AWS_ECR_CONTAINER_IMAGE",
+         "lastScannedAt": scanned},
+    ])
+    with patch("boto3.client", return_value=client):
+        findings = collect(mode="scheduled")
+    assert findings[0].asset_last_seen_ms == int(scanned.timestamp() * 1000)
+
+
+def test_asset_last_seen_keeps_most_recent_scan_per_resource():
+    finding = _make_ec2_finding()
+    older = datetime.datetime(2026, 10, 1, tzinfo=datetime.timezone.utc)
+    newer = datetime.datetime(2026, 10, 13, tzinfo=datetime.timezone.utc)
+    client = _coverage_client([finding], [
+        {"resourceId": "i-0abc123def456", "lastScannedAt": newer},
+        {"resourceId": "i-0abc123def456", "lastScannedAt": older},
+    ])
+    with patch("boto3.client", return_value=client):
+        findings = collect(mode="scheduled")
+    assert findings[0].asset_last_seen_ms == int(newer.timestamp() * 1000)
+
+
+def test_asset_last_seen_none_when_coverage_disabled():
+    finding = _make_ec2_finding()
+    mock_client, _ = _mock_paginator([finding])
+    with patch("boto3.client", return_value=mock_client), \
+         patch.dict(os.environ, {"INSPECTOR2_COVERAGE_FILTER": "false"}):
+        findings = collect(mode="scheduled")
+    assert findings[0].asset_last_seen_ms is None
 
 
 # ---------------------------------------------------------------------------

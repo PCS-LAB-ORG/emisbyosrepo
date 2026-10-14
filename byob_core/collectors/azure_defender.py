@@ -388,11 +388,9 @@ def _parse(row: dict) -> list[RawFinding]:
         f"azure_resource_name:{arm.get('rname', '')}",
         f"source:{details.get('Source', '')}",
         f"resource_type:{_resource_type_tag(resource_type)}",
-        f"status:{mapped_status}",
     ]
-    native_status = str(status.get("code", "") or "")
-    if native_status:
-        tags.append(f"azure_status:{native_status}")
+    # Finding status is per-vulnerability, not per-asset: it is carried in each
+    # vuln's evidence and deliberately kept out of the asset tags.
     if software:
         tags.append(f"software:{software}")
     package_type = additional.get("PackageType")

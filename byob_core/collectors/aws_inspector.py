@@ -148,23 +148,49 @@ def _coverage_hours() -> int:
         return 720
 
 
-def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
-    """Return the set of resource IDs that Inspector2 has scanned within *lookback_hours*.
+def _to_epoch_ms(value: Any) -> int | None:
+    """Convert a boto3 timestamp (datetime) to epoch milliseconds."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp() * 1000)
+    return None
+
+
+def _coverage_keys(resource_id: str) -> list[str]:
+    """Lookup keys for a list_coverage resourceId.
+
+    Lambda ARNs are normalised to the base ARN. ECR image URIs
+    (registry/repo@sha256:...) are also indexed by bare digest, since the
+    coverage resourceId format for images differs between accounts/APIs.
+    """
+    keys = [_lambda_base_arn(resource_id)]
+    if "@" in resource_id:
+        keys.append(resource_id.split("@", 1)[1])
+    return keys
+
+
+def _active_resource_ids(client: Any, lookback_hours: int = 720) -> dict[str, int | None]:
+    """Return ``{resource_id: lastScannedAt_ms}`` for resources Inspector2 scanned
+    within *lookback_hours*.
 
     Uses the ``list_coverage`` API with a ``lastScannedAt`` filter so that only
     resources with a confirmed recent scan are returned.  Resources that have been
     terminated or removed from Inspector2's scope will have an old (or absent)
-    ``lastScannedAt`` and will not appear in the result set.
+    ``lastScannedAt`` and will not appear in the result.
+
+    The keys drive the coverage filter; the values are the asset's real
+    last-scan time and become the asset ``last_seen`` sent to Cortex.
 
     If the call fails for any reason (e.g. missing IAM permission) a warning is
-    logged and an empty set is returned — the caller should treat that as "no
+    logged and an empty dict is returned — the caller should treat that as "no
     filter applied" to avoid silently dropping all findings.
     """
     now = datetime.now(tz=timezone.utc)
     cutoff = datetime.fromtimestamp(now.timestamp() - lookback_hours * 3600, tz=timezone.utc)
     try:
         paginator = client.get_paginator("list_coverage")
-        resource_ids: set[str] = set()
+        scan_times: dict[str, int | None] = {}
         for page in paginator.paginate(
             filterCriteria={
                 "lastScannedAt": [{"startInclusive": cutoff, "endInclusive": now}],
@@ -173,15 +199,22 @@ def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
         ):
             for resource in page.get("coveredResources", []):
                 rid = resource.get("resourceId", "")
-                if rid:
-                    # Normalise Lambda ARNs to base form; ECR images bypass the
-                    # coverage filter entirely so no ECR normalisation needed here.
-                    resource_ids.add(_lambda_base_arn(rid))
+                if not rid:
+                    continue
+                scanned_ms = _to_epoch_ms(resource.get("lastScannedAt"))
+                for key in _coverage_keys(rid):
+                    previous = scan_times.get(key)
+                    # Keep the most recent scan when several entries share a key
+                    # (e.g. multiple scan types for one resource).
+                    if key not in scan_times or (
+                        scanned_ms is not None and (previous is None or scanned_ms > previous)
+                    ):
+                        scan_times[key] = scanned_ms
         logger.info(
-            "Coverage filter: %d resource(s) scanned in the last %d hours.",
-            len(resource_ids), lookback_hours,
+            "Coverage filter: %d resource key(s) scanned in the last %d hours.",
+            len(scan_times), lookback_hours,
         )
-        return resource_ids
+        return scan_times
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "list_coverage call failed (%s) — coverage filter skipped. "
@@ -189,7 +222,7 @@ def _active_resource_ids(client: Any, lookback_hours: int = 720) -> set[str]:
             "INSPECTOR2_COVERAGE_FILTER=false to suppress this warning.",
             exc,
         )
-        return set()
+        return {}
 
 
 def collect(
@@ -242,7 +275,7 @@ def collect(
     # reflects the actual scan schedule — a terminated or out-of-scope
     # EC2 instance will not appear here even if its findings are ACTIVE.
     # ------------------------------------------------------------------
-    active_ids: set[str] | None = None
+    active_ids: dict[str, int | None] | None = None
     if _coverage_filter_enabled():
         resolved_coverage_hours = _coverage_hours() if coverage_hours is None else max(int(coverage_hours), 1)
         logger.info("Coverage filter window: last %d hours.", resolved_coverage_hours)
@@ -253,6 +286,11 @@ def collect(
                 "All findings will be included regardless of scan age."
             )
             active_ids = None  # treat as disabled
+    else:
+        logger.warning(
+            "Coverage filter disabled — Inspector2 lastScannedAt is unavailable, so "
+            "asset last_seen will fall back to the most recent finding timestamp."
+        )
 
     return _collect_with_retry(client, mode, finding_arn, resolved_statuses, resolved_severities, resolved_hours, active_ids)
 
@@ -265,7 +303,7 @@ def _collect_with_retry(
     statuses: list[str],
     severities: list[str],
     lookback_hours: int,
-    active_ids: set[str] | None = None,
+    active_ids: dict[str, int | None] | None = None,
 ) -> list[RawFinding]:
     paginator = client.get_paginator("list_findings")
     kwargs: dict[str, Any] = {"PaginationConfig": {"PageSize": 100}}
@@ -298,6 +336,7 @@ def _collect_with_retry(
     skipped_no_cve = 0
     skipped_no_resource = 0
     page_num = 0
+    with_scan_time = 0
     raw_rtype_counts: dict[str, int] = {}  # raw resource types from Inspector2 before any filtering
     for page in paginator.paginate(**kwargs):
         page_num += 1
@@ -323,16 +362,27 @@ def _collect_with_retry(
                 continue
             parsed = _parse(raw)
             if parsed:
+                raw_resource_type = raw.get("resources", [{}])[0].get("type", "")
+                if raw_resource_type == "AWS_LAMBDA_FUNCTION":
+                    coverage_check_id = _lambda_base_arn(parsed.asset_id)
+                else:
+                    coverage_check_id = parsed.asset_id
+
+                # Asset last_seen = Inspector2's lastScannedAt for the resource,
+                # independent of any vulnerability timestamp.
+                if active_ids:
+                    scan_ms = active_ids.get(coverage_check_id)
+                    if scan_ms is None and raw_resource_type == "AWS_ECR_CONTAINER_IMAGE":
+                        scan_ms = active_ids.get(_ecr_coverage_id(parsed.asset_id))
+                    if scan_ms is not None:
+                        parsed.asset_last_seen_ms = scan_ms
+                        with_scan_time += 1
+
                 # Coverage filter — skip assets Inspector2 hasn't scanned recently.
                 # ECR images are scanned once on push (not on a rolling schedule) so
                 # they are intentionally excluded from the coverage check; their
                 # findings remain valid regardless of when the image was pushed.
-                raw_resource_type = raw.get("resources", [{}])[0].get("type", "")
                 if raw_resource_type != "AWS_ECR_CONTAINER_IMAGE":
-                    if raw_resource_type == "AWS_LAMBDA_FUNCTION":
-                        coverage_check_id = _lambda_base_arn(parsed.asset_id)
-                    else:
-                        coverage_check_id = parsed.asset_id
                     if active_ids is not None and coverage_check_id not in active_ids:
                         logger.debug(
                             "Coverage filter: skipped finding for resource '%s' "
@@ -354,6 +404,12 @@ def _collect_with_retry(
         f", coverage filter active ({len(active_ids)} resources)" if active_ids is not None else "",
         mode, page_num,
     )
+    if findings:
+        logger.info(
+            "Asset last_seen source: %d finding(s) use Inspector2 lastScannedAt, "
+            "%d fall back to finding updatedAt (no coverage entry).",
+            with_scan_time, len(findings) - with_scan_time,
+        )
     logger.info("Resource type breakdown (raw from Inspector2): %s", raw_rtype_counts)
     # Per-resource-type breakdown to aid debugging
     from collections import Counter   # noqa: PLC0415
@@ -535,10 +591,10 @@ def _parse(raw: dict) -> RawFinding | None:
     # Cloud metadata first, then user-defined resource tags (excluding Name — used as asset_name)
     tags = cloud_meta + [f"{k}:{v}" for k, v in user_tags.items() if k != "Name"]
 
-    # Include the Inspector finding status (ACTIVE / SUPPRESSED / CLOSED)
+    # Finding status is per-vulnerability, not per-asset: it is carried in each
+    # vuln's evidence and deliberately kept out of the asset tags (the asset
+    # inherits tags from a single finding, so a status tag there is misleading).
     finding_status = raw.get("status", "")
-    if finding_status:
-        tags.append(f"status:{finding_status}")
 
     # Inspector2 API returns the field as "packageVulnerabilityDetails"
     pkg_vuln = raw.get("packageVulnerabilityDetails") or raw.get("packageVulnerability") or {}

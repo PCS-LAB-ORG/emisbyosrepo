@@ -238,9 +238,13 @@ def test_unrecognised_status_defaults_to_active():
     assert json.loads(findings[0].evidence) == {"status": "ACTIVE"}
 
 
-def test_native_azure_status_preserved_in_tags():
+def test_status_not_in_asset_tags():
+    """Finding status is per-vuln (evidence), never an asset tag."""
     findings, _ = _run([_row(status_code="Healthy")])
-    assert "azure_status:Healthy" in findings[0].tags
+    assert not any(
+        t.startswith("status:") or t.startswith("azure_status:")
+        for t in findings[0].tags
+    )
 
 
 def test_fix_information_preserved_in_raw_output():
@@ -257,11 +261,6 @@ def test_notapplicable_rows_are_skipped():
     """NotApplicable means Defender could not assess — it asserts no vulnerability."""
     findings, _ = _run([_row(status_code="NotApplicable")])
     assert findings == []
-
-
-def test_status_tag_uses_mapped_value():
-    findings, _ = _run([_row(status_code="Unhealthy")])
-    assert "status:ACTIVE" in findings[0].tags
 
 
 # --- severity ---------------------------------------------------------------

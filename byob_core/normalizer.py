@@ -99,6 +99,16 @@ def _dedupe_by_cve(findings: list[RawFinding]) -> tuple[list[RawFinding], int]:
     return list(best.values()), dropped
 
 
+def _asset_scan_time(findings: list[RawFinding]) -> int | None:
+    """Most recent scanner-reported asset scan time across *findings*, or None.
+
+    This is the asset-level timestamp (Inspector2 ``lastScannedAt``) and is
+    independent of any vulnerability ``last_seen``.
+    """
+    times = [f.asset_last_seen_ms for f in findings if f.asset_last_seen_ms is not None]
+    return max(times) if times else None
+
+
 def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool = False) -> list[dict]:
     """Normalise a list of RawFinding objects into Cortex BYOS batch payloads.
 
@@ -156,7 +166,9 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
     skipped_old_assets = 0
 
     for asset_id, asset_findings in grouped.items():
-        asset_last_seen = max(f.last_seen_ms for f in asset_findings)
+        asset_last_seen = _asset_scan_time(asset_findings)
+        if asset_last_seen is None:
+            asset_last_seen = max(f.last_seen_ms for f in asset_findings)
         if asset_last_seen < cutoff_ms:
             if not clamp_old_findings:
                 skipped_old_assets += 1
@@ -218,8 +230,16 @@ def normalize(findings: list[RawFinding], source: str, clamp_old_findings: bool 
             )
             vulnerabilities = vulnerabilities[:MAX_VULNS_PER_ASSET]
 
-        # Asset last_seen = most recent (post-clamp) vuln timestamp
-        asset_last_seen_out = max(v["last_seen"] for v in vulnerabilities)
+        # Asset last_seen = the scanner's own asset scan time (Inspector2
+        # lastScannedAt) regardless of vulnerabilities. Only when the scanner
+        # gives none do we fall back to the most recent (post-clamp) vuln time.
+        asset_last_seen_out = _asset_scan_time(asset_findings)
+        if asset_last_seen_out is None:
+            asset_last_seen_out = max(v["last_seen"] for v in vulnerabilities)
+        elif asset_last_seen_out < cutoff_ms:
+            # Cortex rejects last_seen older than 30 days (HTTP 422).
+            asset_last_seen_out = now_ms
+            needs_tag = True
 
         if needs_tag:
             total_clamped_assets += 1

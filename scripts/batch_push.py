@@ -101,6 +101,7 @@ def _save_findings_cache(
                 "evidence":    f.evidence,
                 "raw_output":  f.raw_output,
                 "source":      f.source,
+                "asset_last_seen_ms": f.asset_last_seen_ms,
             }
             for f in findings
         ],
@@ -167,6 +168,7 @@ def _load_findings_cache(cache_path: pathlib.Path) -> tuple[list, dict]:
                 evidence=   d.get("evidence", ""),
                 raw_output= d.get("raw_output", ""),
                 source=     d.get("source", "aws_inspector"),
+                asset_last_seen_ms=d.get("asset_last_seen_ms"),
             ))
         except KeyError as exc:
             logger.warning("Skipping malformed cache entry (missing field %s).", exc)

@@ -10,7 +10,8 @@ def _now_ms():
 
 
 def _make_finding(asset_id="i-abc", severity="CRITICAL", source="aws_inspector",
-                  last_seen_ms=None, cve_id="CVE-2024-12345", evidence="CVSS 9.8"):
+                  last_seen_ms=None, cve_id="CVE-2024-12345", evidence="CVSS 9.8",
+                  asset_last_seen_ms=None):
     return RawFinding(
         asset_id=asset_id,
         asset_name="web-1",
@@ -27,7 +28,58 @@ def _make_finding(asset_id="i-abc", severity="CRITICAL", source="aws_inspector",
         evidence=evidence,
         raw_output="score: 9.8",
         source=source,
+        asset_last_seen_ms=asset_last_seen_ms,
     )
+
+
+# --- asset last_seen = scanner's asset scan time (lastScannedAt) -----------
+
+def test_asset_last_seen_uses_scan_time_not_vulns():
+    """Asset last_seen comes from asset_last_seen_ms, regardless of vuln times."""
+    now = _now_ms()
+    day = 24 * 60 * 60 * 1000
+    scan = now - 2 * 60 * 60 * 1000  # scanned 2h ago
+    findings = [
+        _make_finding(cve_id="CVE-A", last_seen_ms=now - 10 * day, asset_last_seen_ms=scan),
+        _make_finding(cve_id="CVE-B", last_seen_ms=now - 20 * day, asset_last_seen_ms=scan),
+    ]
+    asset = normalize(findings, "aws_inspector")[0]["assets"][0]
+    assert asset["last_seen"] == scan
+    # Vuln timestamps are unchanged
+    assert {v["last_seen"] for v in asset["vulnerabilities"]} == {now - 10 * day, now - 20 * day}
+
+
+def test_asset_last_seen_scan_time_can_be_older_than_vulns():
+    """Even when a vuln was updated more recently, the scan time wins."""
+    now = _now_ms()
+    scan = now - 5 * 24 * 60 * 60 * 1000
+    asset = normalize(
+        [_make_finding(last_seen_ms=now - 1000, asset_last_seen_ms=scan)], "aws_inspector",
+    )[0]["assets"][0]
+    assert asset["last_seen"] == scan
+
+
+def test_recent_scan_keeps_asset_with_only_old_vulns():
+    """A recently scanned asset is not dropped just because its vulns are old."""
+    now = _now_ms()
+    old = now - 40 * 24 * 60 * 60 * 1000
+    batches = normalize(
+        [_make_finding(last_seen_ms=old, asset_last_seen_ms=now - 1000)], "aws_inspector",
+    )
+    asset = batches[0]["assets"][0]
+    assert asset["last_seen"] == now - 1000
+    # The old vuln is still clamped so Cortex accepts it
+    assert asset["vulnerabilities"][0]["last_seen"] >= now
+
+
+def test_asset_last_seen_falls_back_to_vulns_without_scan_time():
+    now = _now_ms()
+    findings = [
+        _make_finding(cve_id="CVE-A", last_seen_ms=now - 5000),
+        _make_finding(cve_id="CVE-B", last_seen_ms=now - 1000),
+    ]
+    asset = normalize(findings, "aws_inspector")[0]["assets"][0]
+    assert asset["last_seen"] == now - 1000
 
 
 def test_normalize_returns_aws_vendor():

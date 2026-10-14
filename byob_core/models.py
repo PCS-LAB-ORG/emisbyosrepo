@@ -19,6 +19,11 @@ class RawFinding:
     evidence: str
     raw_output: str
     source: str  # "aws_inspector" | "azure_defender"
+    # When the scanner last scanned the *asset* (e.g. Inspector2 coverage
+    # lastScannedAt), in epoch ms. Independent of any vulnerability timestamp.
+    # None when the scanner gives no asset-level scan time; the normalizer then
+    # falls back to the most recent vulnerability last_seen.
+    asset_last_seen_ms: int | None = None
 
 
 @dataclass
